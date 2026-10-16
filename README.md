@@ -619,13 +619,3 @@ Built for the **Razorpay Buildathon, Track 01 (Agent-to-Agent commerce)**. How i
 | Razorpay implementation | Paise conversion, HMAC verification, hosted checkout, webhook dedup, stock compensation |
 | Audit and governance | `/audit/verify`, `/audit/anchor`, Command Centre |
 | Engineering quality | 167 passing tests, typed code, dual-transport MCP, SQLite/PostgreSQL |
-
----
-
-## License and Author
-
-**License:** _add a license (e.g. MIT) and a `LICENSE` file._
-
-**Author:** Surya S · [@SuryaSK-dev](https://github.com/SuryaSK-dev)
-
-Issues and pull requests are welcome. Please run `pytest` before submitting changes.
