@@ -1,6 +1,4 @@
 # 🌐 Agentic Commerce Gateway
-
-> **Track 01: AI Growth & Transactable Merchants**  
 > *Turning Merchant Catalogs into Trusted, Transactable AI-Buyable Storefronts with Grounded Sales & Intelligent Upsells (+40.8% Empirical AOV Lift), Deterministic Policy Mandates, Three-Tier Human Confirmation Gating, Server-Authorized Razorpay Payment Rails, and a Hash-Chained, Tamper-Evident Audit Ledger with Exportable Anchors.*
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.14-blue.svg)](https://www.python.org/)
