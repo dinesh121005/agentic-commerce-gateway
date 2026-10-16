@@ -10,7 +10,7 @@
 [![OAuth](https://img.shields.io/badge/OAuth-2.1%20%2B%20JWT-green.svg)](https://oauth.net/2.1/)
 [![Tests](https://img.shields.io/badge/Tests-167%20passing-brightgreen.svg)](#testing)
 
-**Live demo:** [razorpay-c454.onrender.com](https://razorpay-c454.onrender.com) · **API docs:** [/docs](https://razorpay-c454.onrender.com/docs) · **Admin dashboard:** [/admin/dashboard](https://razorpay-c454.onrender.com/admin/dashboard)
+**API docs:** [/docs](https://razorpay-c454.onrender.com/docs) · **Admin dashboard:** [/admin/dashboard](https://razorpay-c454.onrender.com/admin/dashboard)
 
 ---
 
