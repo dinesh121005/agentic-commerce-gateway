@@ -1,321 +1,447 @@
 # 🌐 Agentic Commerce Gateway
-> *Turning Merchant Catalogs into Trusted, Transactable AI-Buyable Storefronts with Grounded Sales & Intelligent Upsells (+40.8% Empirical AOV Lift), Deterministic Policy Mandates, Three-Tier Human Confirmation Gating, Server-Authorized Razorpay Payment Rails, and a Hash-Chained, Tamper-Evident Audit Ledger with Exportable Anchors.*
 
-[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.14-blue.svg)](https://www.python.org/)
+> A zero-trust, merchant-side control plane that makes a store safely sellable to AI buyer agents: grounded sales conversations, budget-aware upsells, deterministic spending mandates, human-in-the-loop confirmation, Razorpay payment rails, and a tamper-evident audit ledger.
+
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
-[![Razorpay](https://img.shields.io/badge/Razorpay-Test%20Mode%20Rails-0C2340.svg)](https://razorpay.com/)
-[![Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash%20AI-8E75C2.svg)](https://ai.google.dev/)
-[![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-Remote%20%26%20Local-FF6F00.svg)](https://modelcontextprotocol.io/)
-[![OAuth 2.1](https://img.shields.io/badge/OAuth-2.1%20JWT%20Binding-green.svg)](https://oauth.net/2.1/)
-[![Tests](https://img.shields.io/badge/Tests-187%20Passed%20(100%25)-brightgreen.svg)](#-test-suite-verification)
+[![Razorpay](https://img.shields.io/badge/Razorpay-Test%20Mode-0C2340.svg)](https://razorpay.com/)
+[![Gemini](https://img.shields.io/badge/Gemini-2.5%20Flash-8E75C2.svg)](https://ai.google.dev/)
+[![MCP](https://img.shields.io/badge/MCP-Remote%20%26%20Stdio-FF6F00.svg)](https://modelcontextprotocol.io/)
+[![OAuth](https://img.shields.io/badge/OAuth-2.1%20%2B%20JWT-green.svg)](https://oauth.net/2.1/)
+[![Tests](https://img.shields.io/badge/Tests-167%20passing-brightgreen.svg)](#testing)
+
+**Live demo:** [razorpay-c454.onrender.com](https://razorpay-c454.onrender.com) · **API docs:** [/docs](https://razorpay-c454.onrender.com/docs) · **Admin dashboard:** [/admin/dashboard](https://razorpay-c454.onrender.com/admin/dashboard)
 
 ---
 
-## 🎯 The One Loop (Headline Value Proposition)
+## Table of Contents
 
-> **"A merchant becomes safely sellable to AI buyers, and the merchant's sales AI raises basket value (+40.8% AOV) without ever exceeding the buyer's spending mandate."**
+1. [Overview](#overview)
+2. [Key Features](#key-features)
+3. [How a Purchase Flows](#how-a-purchase-flows)
+4. [Architecture](#architecture)
+5. [Policy Engine and Mandates](#policy-engine-and-mandates)
+6. [Payment Rails: What Is Live vs. Simulated](#payment-rails-what-is-live-vs-simulated)
+7. [Merchant Sales AI and Revenue Growth](#merchant-sales-ai-and-revenue-growth)
+8. [Audit Ledger](#audit-ledger)
+9. [MCP Tools](#mcp-tools)
+10. [REST API](#rest-api)
+11. [Quick Start](#quick-start)
+12. [Configuration](#configuration)
+13. [Connecting AI Clients](#connecting-ai-clients)
+14. [Buyer Agent Instructions](#buyer-agent-instructions)
+15. [Demo Scenarios](#demo-scenarios)
+16. [Admin Command Centre](#admin-command-centre)
+17. [Testing](#testing)
+18. [Project Structure](#project-structure)
+19. [Security Model and Known Limitations](#security-model-and-known-limitations)
+20. [Roadmap](#roadmap)
+21. [Hackathon Context](#hackathon-context)
+22. [License and Author](#license-and-author)
+
+---
+
+## Overview
+
+### The problem
+
+Online checkout assumes a human typing card details. As AI agents (Claude, ChatGPT, custom agents) start handling shopping and procurement, giving them raw card access or an unconstrained merchant API creates real hazards:
+
+| Hazard | What goes wrong |
+|---|---|
+| **Hallucination and overspending** | The agent invents a product or price, or spends far beyond what the user intended. |
+| **Unilateral authorization** | High-value purchases happen without an explicit human decision. |
+| **Dead-end rejections** | Over-limit requests just fail instead of escalating to a human payment path. |
+| **Data leakage** | Merchant databases or credentials are exposed to client-side agents. |
+| **No audit trail** | Probabilistic agent behavior has no verifiable record for compliance. |
+
+### The solution
+
+The gateway sits between a **buyer agent**, the **merchant's sales AI**, and **Razorpay**. The buyer agent can only *propose*. A deterministic policy engine decides what happens next, and the LLM never has authority over money.
+
+> **The one loop:** a merchant becomes safely sellable to AI buyers, and the merchant's sales AI raises basket value without ever exceeding the buyer's spending mandate.
 
 ```
-[Buyer Agent Inquires] ──> [Merchant AI Proposes Grounded Upsell (+40.8%)] ──> [Zero-Trust Mandate Gate] ──> [Razorpay Test Rails] ──> [Tamper-Evident Audit]
+Buyer inquires → Merchant AI quotes (grounded) + upsells → Mandate policy gate → Razorpay rails → Tamper-evident audit
 ```
 
 ---
 
-## ⚡ Finalist 3-Minute Live Demo Sequence (Track 01 Headline)
+## Key Features
 
-To experience the full end-to-end commercial outcome and security model in under three minutes, run the automated CLI demo or execute it directly in the [Admin Dashboard Sandbox](https://razorpay-c454.onrender.com/admin/dashboard) (or via Claude Desktop / Remote MCP):
+- **Three-tier authorization:** autonomous micro-purchases, token-gated human confirmation, and hosted-checkout escalation.
+- **Deterministic policy engine:** six ordered checks (identity, expiry, merchant, category, per-transaction cap, daily cap). No LLM is involved in approval.
+- **Grounded merchant AI:** Gemini 2.5 Flash reasons over the catalog, but every price, description and stock count is re-validated against the database. Hallucinated items are rejected.
+- **Budget-aware upsells:** `suggest_addons` finds complementary items that fit inside the buyer's remaining headroom.
+- **Never a dead end:** over-limit purchases escalate to a Razorpay hosted checkout link plus UPI QR code.
+- **Replay-safe confirmation:** signed 5-minute JWT tokens, bucketed idempotency keys, and policy re-validation at confirmation time.
+- **Hash-chained audit ledger:** append-only SHA-256 chain with `verify` and exportable `anchor` endpoints.
+- **Dual-transport MCP:** remote Streamable HTTP (OAuth 2.1 protected) and local stdio.
+- **Verified webhooks:** HMAC-SHA256 signature checks, persistent deduplication, and automatic stock restoration on failure.
+- **Admin Command Centre:** live telemetry, mandate management, catalog view, audit trail, and an agent sandbox.
 
-```bash
-# Execute the complete 3-minute journey in under 60 seconds:
-python scripts/demo_3min_buyer_journey.py
+---
+
+## How a Purchase Flows
+
+The gateway routes every purchase proposal into one of three tiers. The ₹500 boundary is fixed; the upper boundary is each customer's mandate limit (₹2,000 in the demo).
+
+| Tier | Condition | Gateway behavior | Result status |
+|---|---|---|---|
+| **1. Autonomous** | Amount < ₹500 (and within mandate) | Executes without confirmation | `AUTO-PAID` |
+| **2. Human-gated** | ₹500 ≤ amount ≤ mandate limit | Returns `requires_confirmation: true` and a signed 5-minute `confirmation_token`; the agent must ask the human, then call `confirm_purchase` | `GATED-APPROVED` |
+| **3. Escalated** | Amount > mandate limit | Returns a Razorpay hosted checkout `payment_url` and `qr_code_url` for manual payment | `PENDING-PAYMENT` |
+
+Policy violations (wrong merchant, category, expired mandate, daily cap exceeded) return a `422` rejection and are written to the audit ledger.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Human
+    participant B as Buyer AI (MCP client)
+    participant G as Gateway
+    participant P as Policy Engine
+    participant R as Razorpay
+
+    H->>B: "I need a French press, budget ₹1,500"
+    B->>G: inquire_merchant / search_products
+    G-->>B: Grounded quote (catalog-verified)
+    B->>G: suggest_addons(product, remaining_budget)
+    G-->>B: Add-on within headroom
+    B->>G: propose_purchase(product_id, quantity)
+    G->>P: evaluate(mandate, request)
+    alt Under ₹500
+        P-->>G: AUTO-APPROVE
+        G-->>B: REF-XXXXXXXX (AUTO-PAID)
+    else ₹500 to mandate limit
+        P-->>G: REQUIRES_CONFIRMATION
+        G-->>B: confirmation_token (5 min)
+        B->>H: "Place this order for ₹X?"
+        H-->>B: "Yes"
+        B->>G: confirm_purchase(token)
+        G->>P: re-validate mandate state
+        G->>R: Create order (paise)
+        G-->>B: REF-XXXXXXXX (GATED-APPROVED)
+    else Over mandate limit
+        G->>R: Create order for hosted checkout
+        G-->>B: payment_url + qr_code_url
+        B->>H: Pay via UPI / card / netbanking
+    end
 ```
 
-### The 5-Step Live Journey:
-1. **Step 1 — Natural Language Procurement**: Buyer AI searches for a barista-grade French press coffee maker (budget ₹1,500). Merchant Sales AI (`POST /merchant/inquire`) matches `HK005` (French Press, ₹999) with grounded catalog specs.
-2. **Step 2 — Dynamic Headroom Add-On Reasoning**: Merchant Growth AI (`POST /merchant/recommend-addons`) reasons over catalog synergy and remaining budget headroom (₹501). Recommends `FD007` (Kumbakonam Filter Coffee, ₹420) with exact headroom preservation (₹81 buffer saved, **+42.0% AOV Lift**).
-3. **Step 3 — Deterministic Mandate Policy Gate**: Buyer AI proposes purchase (`POST /agent/purchase`) authenticated via OAuth 2.1 token. Policy engine evaluates spending limits deterministically (auto-debit for approved micro-spend vs. single-use JWT human confirmation).
-4. **Step 4 — Honest Payment Execution & Escalation**:
-   - **Razorpay test-mode order/payment verification is live; autonomous mandate settlement is demonstrated through a controlled sandbox wallet.**
-   - **Out-of-Mandate Escalation**: High-value purchase (e.g. 4K Monitor @ ₹4,999) exceeding mandate cap escalates to real **Razorpay Test-Mode Hosted Checkout** (`order_*`) with live checkout link and QR code.
-5. **Step 5 — Cryptographic Dual-Layer Audit Verification**: `GET /audit/verify` traverses the hash-chained, tamper-evident audit ledger with exportable anchors and reconciles the projection view with zero tampering.
-
-
-
 ---
 
-## 📌 Live Demo & Endpoints
-
-> ⚠️ **Security Notice**: All listed keys are **SANDBOX DEMO ONLY**. In production, all secrets are strictly loaded from zero-trust environment variables; default keys are rejected on startup.
-
-| Resource | URL | Description / Credentials |
-|---|---|---|
-| 🌐 **Live Web Gateway** | [https://razorpay-c454.onrender.com](https://razorpay-c454.onrender.com) | Gateway Root & System Health |
-| 📊 **Admin Command Centre** | [https://razorpay-c454.onrender.com/admin/dashboard](https://razorpay-c454.onrender.com/admin/dashboard) | Demo Sandbox Key: `dev-admin-secret-key` |
-| 💳 **Hosted Self-Checkout UI** | [https://razorpay-c454.onrender.com/checkout](https://razorpay-c454.onrender.com/checkout) | Standalone Razorpay Checkout & UPI QR Code UI |
-| 📖 **Interactive API Docs (Swagger)** | [https://razorpay-c454.onrender.com/docs](https://razorpay-c454.onrender.com/docs) | OpenAPI 3.1 REST Spec (`simulate-webhook` hidden in prod) |
-| 🤖 **Remote Streamable MCP Endpoint** | `https://razorpay-c454.onrender.com/mcp` | **Recommended Demo Path**: OAuth 2.1 Protected |
-| 🔐 **OAuth Discovery Metadata** | [https://razorpay-c454.onrender.com/.well-known/oauth-authorization-server](https://razorpay-c454.onrender.com/.well-known/oauth-authorization-server) | RFC 8414 Server Metadata |
-| 🔑 **OAuth Login & SSO Portal** | [https://razorpay-c454.onrender.com/oauth/authorize](https://razorpay-c454.onrender.com/oauth/authorize) | Google SSO + Self-Service User Registration |
-| 🔗 **Cryptographic Ledger Anchor** | [https://razorpay-c454.onrender.com/audit/anchor](https://razorpay-c454.onrender.com/audit/anchor) | Exportable SHA-256 Checkpoint Digest |
-
----
-
-## 💡 Problem & Solution Overview
-
-### The Problem
-Traditional e-commerce assumes a human browsing a webpage, typing card numbers, and clicking buttons. As AI agents evolve from conversational assistants into autonomous execution agents, users want delegate agents (like Claude Desktop or custom agents) to handle shopping, procurement, and daily replenishment.
-
-However, granting an AI agent direct access to credit cards or unconstrained merchant APIs creates severe financial hazards:
-1. **Hallucination & Overspending**: An agent might spend ₹50,000 instead of staying within budget or invent fictional products.
-2. **Unilateral Authorization**: An AI agent should propose purchases; high-value transactions must be gated behind explicit human authorization.
-3. **Dead-End Rejections**: When an item exceeds an autonomous allowance, traditional gateways simply throw an error rather than escalating to a secure human payment method.
-4. **Data Leakage**: Exposing private merchant database credentials or raw APIs to client-side agents breaks security perimeters.
-5. **Audit Deficits**: Probabilistic AI actions require a hash-chained, tamper-evident audit ledger with exportable anchors for financial compliance.
-
-### The Solution: Agentic Commerce Gateway
-
-The **Agentic Commerce Gateway** is a zero-trust merchant-side control plane between Buyer AI Agents, Merchant Sales AI, and Razorpay Payment Rails:
+## Architecture
 
 ```mermaid
 flowchart TD
-    subgraph Buyer_Plane["Buyer Intelligence (Claude / Client)"]
-        User["Human Buyer"] <-->|"Prompts & Approvals"| BuyerAI["Buyer AI Agent<br/>(Claude Desktop / Web MCP)"]
+    subgraph Buyer["Buyer plane"]
+        User["Human"] <--> BuyerAI["Buyer AI agent<br/>Claude / ChatGPT / custom"]
     end
 
-    subgraph Gateway_Plane["Agentic Commerce Gateway (FastAPI Control Plane)"]
-        BuyerAI <-->|"MCP / OAuth 2.1"| MCP_Layer["MCP Transport Layer<br/>(Remote HTTP / Local STDIO)"]
-        MCP_Layer <-->|"Inquire & Upsell"| MerchantAI["Merchant Sales AI<br/>(Gemini 2.5 Flash + Grounding)"]
-        MerchantAI <-->|"Real Catalog Only"| Catalog["Product Catalog<br/>(48 Products, Multi-Merchant)"]
-        MCP_Layer -->|"1. Propose Purchase"| PolicyEngine{"Deterministic<br/>Policy Engine"}
-        
-        PolicyEngine -->|"Policy Violation"| Reject["422 Policy Rejection<br/>(Audit Logged)"]
-        PolicyEngine -->|"Over Mandate Limit (Above ₹2,000)"| HostedLink["Generate Razorpay Link<br/>& UPI QR Code (/checkout)"]
-        PolicyEngine -->|"Under ₹500 Micro"| AutoExec["Autonomous Execution<br/>(Auto-Paid / Pre-Authorized)"]
-        PolicyEngine -->|"₹500 to Limit Gated"| TokenIssuer["Sign 5-Min JWT<br/>Confirmation Token"]
-        
-        HostedLink -->|"Checkout URL"| BuyerAI
-        TokenIssuer -->|"Quote + Token"| BuyerAI
-        BuyerAI -->|"Human Says YES"| Confirm["confirm_purchase()"]
-        Confirm --> PolicyEngine2{"Re-Evaluate<br/>Mandate State"}
-        PolicyEngine2 -->|"Approved"| RazorpayClient["Razorpay Rails"]
-        AutoExec --> RazorpayClient
-        
-        BuyerAI <-->|"Track Order / Payment"| StatusCheck["check_order_status()<br/>& inquire_merchant()"]
-        StatusCheck <--> AuditLedger
+    subgraph Gateway["Gateway (FastAPI control plane)"]
+        BuyerAI <-->|"MCP over OAuth 2.1 or stdio"| MCP["MCP transport"]
+        MCP <--> Merchant["Merchant Sales AI<br/>Gemini 2.5 Flash + grounding"]
+        Merchant <--> Catalog[("Catalog<br/>48 products")]
+        MCP --> Policy{"Deterministic<br/>policy engine"}
+        Policy -->|"Violation"| Reject["422 + audit"]
+        Policy -->|"Tier 1"| Auto["Autonomous execution"]
+        Policy -->|"Tier 2"| Token["Signed confirmation token"]
+        Policy -->|"Tier 3"| Link["Hosted checkout + QR"]
     end
 
-    subgraph Payment_Plane["Razorpay & Ledger Plane"]
-        RazorpayClient -->|"Create Order in Paise"| RZP_API["Razorpay Test Mode API"]
-        HostedLink --> RZP_API
-        RZP_API -->|"Order ID + Receipt"| AuditLedger[("Append-Only Cryptographic<br/>SHA-256 Event Ledger")]
-        RZP_API -.->|"Webhook: payment.captured / payment_link.paid"| WebhookHandler["Webhook Processor<br/>(HMAC Verified + Persistent Dedup)"]
-        WebhookHandler -->|"Failure Compensation"| RestoreStock["Restore Inventory Stock"]
-        WebhookHandler --> AuditLedger
+    subgraph Pay["Payment and ledger plane"]
+        Auto --> RZP["Razorpay API"]
+        Token -->|"after confirm"| RZP
+        Link --> RZP
+        RZP -.->|"signed webhooks"| Hook["Webhook processor<br/>HMAC + dedup"]
+        Hook --> Ledger[("Hash-chained<br/>audit ledger")]
+        Hook -->|"on failure"| Restock["Restore stock"]
+        RZP --> Ledger
     end
 
-    subgraph Admin_Plane["Observability & Governance"]
-        AdminUser["Merchant Admin"] <-->|"Real-Time Telemetry"| AdminDash["Command Centre Dashboard<br/>(/admin/dashboard)"]
-        AdminDash --> AuditLedger
-        AdminDash --> Catalog
+    subgraph Admin["Governance"]
+        Ops["Merchant admin"] <--> Dash["Command Centre"]
+        Dash --> Ledger
+        Dash --> Catalog
     end
 ```
 
+**Design principle:** the LLM proposes and explains; deterministic code authorizes and records. Gemini output is never trusted for price, stock, or approval.
+
 ---
 
-## 🛡️ Core Architectural Pillars
+## Policy Engine and Mandates
 
-### 1. Three-Tier Policy Enforcement & Two-Step Confirmation Gating
-The gateway enforces a bounded, three-tier authorization model:
-- **Tier 1: Autonomous Auto-Pay ($< ₹500$)**: Micro-purchases within daily limits execute autonomously for seamless convenience (`AUTO-PAID`).
-- **Tier 2: Two-Step Human Gating ($\ge ₹500$ to Mandate Limit)**: Purchases generate a cryptographically signed, 5-minute JWT `confirmation_token`. The agent must present the quote to the user and call `confirm_purchase(confirmation_token)` only upon explicit human consent.
-- **Tier 3: Mandate Escalation & Hosted Checkout ($> \text{Mandate Limit}$, e.g. $> ₹2,000$)**: When an item exceeds autonomous spend bounds, the gateway generates a secure Razorpay Hosted Checkout Link (`payment_url`) and UPI QR Code (`qr_code_url`) allowing the user to complete payment manually via UPI, Netbanking, or Card on `/checkout`.
-- **Token Replay Immunity & Idempotency**: Confirmation tokens and purchase proposals are protected by bucketed idempotency keys—re-submitting returns the existing transaction without minting duplicate orders.
-- **Pre-Execution Policy Re-Validation**: At confirmation time, mandate limits, expiration, and cumulative daily spending caps are re-checked before Razorpay is called.
+A **mandate** is a customer's standing delegation to their agent: what it may buy, from whom, and how much. The pure `evaluate()` function applies six checks in order and stops at the first failure:
 
-### 2. Deterministic Policy Mandates
-Spending rules are evaluated with mathematical certainty across 6 hierarchical checks:
-1. **Customer Existence**: Customer identity verified via OAuth 2.1 JWT `sub` claim.
-2. **Mandate Expiration**: Mandates with past expiry timestamps are strictly rejected.
-3. **Merchant Authorization**: Merchant must be explicitly whitelisted (e.g., `MERCH_ELEC`, `MERCH_FOOD`).
-4. **Category Authorization**: Product category must match allowed list (`electronics`, `food`, `home_kitchen`, `apparel`).
-5. **Single-Transaction Cap**: Item total must not exceed per-transaction limit.
-6. **Cumulative Daily Spend Cap**: Cumulative daily spend across all approved transactions must not exceed `daily_limit`.
+| # | Check | Rejects when |
+|---|---|---|
+| 1 | **Customer existence** | The OAuth JWT `sub` claim does not map to a known customer |
+| 2 | **Mandate expiry** | The mandate's expiry timestamp has passed |
+| 3 | **Merchant authorization** | The merchant is not whitelisted (e.g. `MERCH_ELEC`, `MERCH_FOOD`) |
+| 4 | **Category authorization** | The category is not allowed (`electronics`, `food`, `home_kitchen`, `apparel`) |
+| 5 | **Single-transaction cap** | The item total exceeds `max_transaction_amount` |
+| 6 | **Cumulative daily cap** | Approved spend for the day would exceed `daily_limit` |
 
-### 3. Track 01 AI Revenue Growth Engine & Empirical AOV Benchmark
-- **Authoritative Quote Grounding (Gemini 2.5 Flash)**: Gemini reasons over the store's private inventory, grounding all prices, descriptions, and stock counts against the live database to eliminate hallucinations. If an LLM hallucinates a non-existent item or a fabricated price (e.g. ₹10 for a ₹4,999 monitor), the control plane deterministically rejects the fake item and restores the authoritative catalog price and stock.
-  - *Automated Grounding Test*: [`tests/test_gemini_grounding.py`](file:///d:/RazorPay/tests/test_gemini_grounding.py)
-  - *Interactive Live Grounding Demo*: `python scripts/demo_gemini_grounding.py`
-- **Smart Add-on Recommendations (`suggest_addons`)**: Discovers complementary cross-sell items from the store's affinity graph that fit precisely within the customer's remaining budget headroom without ever violating mandate limits.
-- **Offline Simulated Benchmark (AOV Lift Measurement)**: To measure potential commercial uplift without inflated marketing claims, we evaluated **47 synthetic buyer procurement sessions** across electronics, food, home & kitchen, and apparel using the store's cross-sell affinity map within available mandate headroom:
-  - *Baseline Average Basket Value (AOV)*: **₹708.53** (single-item catalog search)
-  - *AI-Upsold Average Basket Value (AOV)*: **₹997.60** (with complementary add-on)
-  - *Simulated Net AOV Lift*: **+40.8%**
-  - *Add-On Attach Rate*: **78.72%**
-  - *Mandate Budget Compliance*: **100.0% (Zero over-budget violations)**
-  - *Methodology*: Compares single-item baseline intent vs. budget-constrained cross-sell add-on selection. Reproducible via `python scripts/benchmark_aov.py` (saved to [`benchmarks/aov_benchmark_results.json`](file:///d:/RazorPay/benchmarks/aov_benchmark_results.json)).
+Safeguards around the engine:
 
-### 4. Real Razorpay Test Rails vs. Simulated Mandate Settlement
+- **Re-validation at confirmation:** limits, expiry, and cumulative daily spend are re-checked before Razorpay is called, so a stale token cannot bypass a changed mandate.
+- **Token replay immunity:** confirmation tokens and proposals use bucketed idempotency keys, so resubmission returns the existing transaction rather than creating a duplicate order.
+- **Conversational mandate changes are gated too:** `modify_spending_mandate` issues its own signed confirmation challenge and only applies the change after explicit human approval, with a `CUSTOMER_MANDATE_UPDATED_CONVERSATIONAL` audit record.
 
-> **Architectural Reality**:  
-> **Razorpay test-mode order/payment verification is live; autonomous mandate settlement is demonstrated through a controlled sandbox wallet.**  
-> • **Live Razorpay Test Rails**: Order creation in sub-unit paise, hosted checkout UI, and server-side HMAC-SHA256 signature / webhook verification are 100% live on `api.razorpay.com`.  
-> • **Autonomous Mandate Settlement**: For micro-purchases under ₹500, autonomous execution is demonstrated through a **controlled sandbox wallet** with strict balance checks and stock restoration, cleanly separated from external customer payment capture.
+---
+
+## Payment Rails: What Is Live vs. Simulated
+
+This distinction matters, so it is stated plainly.
+
+| Component | Status |
+|---|---|
+| Razorpay order creation (amounts converted to paise) | **Live** against `api.razorpay.com` in test mode |
+| Hosted checkout UI and UPI QR | **Live** (test mode) |
+| HMAC-SHA256 payment signature verification | **Live** |
+| Webhook verification (`payment.captured`, `order.paid`, `payment_link.paid`) and dedup | **Live** |
+| Autonomous micro-purchase settlement (Tier 1) | **Simulated** via a controlled sandbox mandate wallet with balance checks and stock restoration |
+
+### Status vocabulary
+
+| State | Meaning |
+|---|---|
+| `AUTHORIZED` | Policy engine approved the request. **No funds have moved.** |
+| `ORDER_CREATED` / `PENDING` | A real Razorpay test order (`order_XXXX`) exists and awaits customer payment. |
+| `PAYMENT_CAPTURED` / `PAID` | Customer payment completed and the signature or webhook was cryptographically verified. |
+| `MANDATE_SETTLED` | A Tier 1 micro-purchase was settled against the simulated sandbox wallet. |
+| `REJECTED` / `ESCALATED` | The request exceeded autonomous authority and was routed to a human via hosted checkout or QR. |
+| `PAYMENT_FAILED` → `RESTOCK_COMPENSATED` | Payment failed or was cancelled; inventory was restored. |
 
 ```mermaid
 stateDiagram-v2
-    [*] --> EVALUATING: Buyer AI Purchase Proposal
-    
-    EVALUATING --> REJECTED: Mandate Limit Exceeded / Policy Violation
-    REJECTED --> HOSTED_ESCALATION: Over ₹2,000 allowance (Escalate to Human)
-    
-    EVALUATING --> PENDING_CONFIRMATION: ₹500 to ₹2,000 (Tier 2 Human Gate)
-    PENDING_CONFIRMATION --> AUTHORIZED: Explicit Human Confirmation (Signed JWT)
-    
-    EVALUATING --> AUTHORIZED: Under ₹500 (Tier 1 Micro-Spend Auto-Approved)
-    
-    state "Controlled Sandbox Mandate Path" as AutoPath {
-        AUTHORIZED --> MANDATE_SETTLED: Simulated Mandate Wallet Debit (Checked Balance)
-    }
-    
-    state "Live Razorpay Test Rails Path" as RazorpayPath {
-        HOSTED_ESCALATION --> ORDER_CREATED: Razorpay Orders API (status: created)
-        AUTHORIZED --> ORDER_CREATED: Razorpay Orders API (Paise Sub-units)
-        ORDER_CREATED --> PENDING_PAYMENT: Awaiting Customer UPI / Card
-        PENDING_PAYMENT --> PAYMENT_CAPTURED: Signature or Webhook HMAC Verified
-        PENDING_PAYMENT --> PAYMENT_FAILED: Payment Failed / Cancelled
-        PAYMENT_FAILED --> RESTOCK_COMPENSATED: Stock Restored
-    }
+    [*] --> EVALUATING
+    EVALUATING --> REJECTED: Policy violation
+    EVALUATING --> ESCALATED: Over mandate limit
+    EVALUATING --> PENDING_CONFIRMATION: Tier 2
+    PENDING_CONFIRMATION --> AUTHORIZED: Human confirms (signed JWT)
+    EVALUATING --> AUTHORIZED: Tier 1
+    AUTHORIZED --> MANDATE_SETTLED: Sandbox wallet debit (Tier 1)
+    AUTHORIZED --> ORDER_CREATED: Razorpay Orders API
+    ESCALATED --> ORDER_CREATED: Hosted checkout
+    ORDER_CREATED --> PAYMENT_CAPTURED: Signature / webhook verified
+    ORDER_CREATED --> PAYMENT_FAILED: Failed or cancelled
+    PAYMENT_FAILED --> RESTOCK_COMPENSATED: Stock restored
 ```
 
-#### Verbal Distinctions for Judges
-| State Term | Meaning & Execution Reality |
+Verify the live rails yourself:
+
+```bash
+python scripts/verify_live_razorpay.py
+pytest tests/test_live_razorpay_checkout.py
+```
+
+---
+
+## Merchant Sales AI and Revenue Growth
+
+### Authoritative quote grounding
+
+Gemini 2.5 Flash reasons over the store's private inventory, but the control plane treats its output as a *suggestion*. Every returned item is re-checked against the live database. If the model invents a product or misprices one (for example, ₹10 for a ₹4,999 monitor), the item is dropped or corrected to the authoritative catalog price and stock.
+
+- Test: [`tests/test_gemini_grounding.py`](tests/test_gemini_grounding.py)
+- Demo: `python scripts/demo_gemini_grounding.py`
+
+### Budget-aware add-ons
+
+`suggest_addons(product_id, remaining_budget)` consults the catalog's affinity map and returns complementary items that fit within the buyer's remaining headroom, so an upsell can never push the basket past the mandate.
+
+### Simulated AOV benchmark
+
+An offline benchmark over **47 synthetic buyer sessions** (electronics, food, home and kitchen, apparel) compares single-item baseline intent against budget-constrained add-on selection:
+
+| Metric | Result |
 |---|---|
-| **`AUTHORIZED`** | Policy engine verified mandate limits, merchant whitelist, category, and daily budget. Funds have **not** moved yet. |
-| **`ORDER_CREATED` / `PENDING`** | Real Razorpay Order entity minted on live test API (`order_XXXX`, in sub-unit paise). Awaiting customer payment. |
-| **`PAYMENT_CAPTURED` / `PAID`** | Authentic customer payment completed; cryptographic HMAC-SHA256 signature (`order_id\|payment_id`) or webhook verified. |
-| **`MANDATE_SETTLED`** | Autonomous micro-purchase ($< ₹500$) settled against customer's simulated sandbox mandate balance. |
-| **`REJECTED` / `ESCALATED`** | Purchase exceeds autonomous spending mandate; escalated to customer via hosted checkout link or UPI QR code. |
+| Baseline average basket value | ₹708.53 |
+| With AI add-on | ₹997.60 |
+| **Simulated AOV lift** | **+40.8%** |
+| Add-on attach rate | 78.72% (37 of 47 sessions) |
+| Mandate budget violations | 0 |
 
-- **Live Razorpay Test Mode Verification**: Real test-mode orders, HMAC-SHA256 signature verification, and ledger capture are verified against `api.razorpay.com`:
-  - *Automated Test*: [`tests/test_live_razorpay_checkout.py`](file:///d:/RazorPay/tests/test_live_razorpay_checkout.py) (passing live)
-  - *Interactive Live Verification Script*: `python scripts/verify_live_razorpay.py`
-- **Sub-Unit Paise Conversion**: Accurate currency math converting INR ₹ to paise (`int(round(amount * 100))`).
-- **Webhook Security & Deduplication**: Cryptographically verifies `X-Razorpay-Signature` on incoming webhooks (`payment.captured`, `order.paid`, `payment_link.paid`). Deduplication prevents replay attacks. The test simulator `/payment/simulate-webhook` is admin-protected, disabled by default in production, and hidden from public production OpenAPI schema.
-
-### 5. Hash-Chained, Tamper-Evident Audit Ledger with Exportable Anchors
-- **Cryptographic Hash Chain**: Every proposal, policy evaluation, human confirmation, checkout escalation, and webhook event is sequentially linked in an append-only SHA-256 hash chain (`prev_hash` $\rightarrow$ `event_hash`).
-- **Dual-Layer Projection Reconciliation**: The SQLite hash chain is tamper-evident within our application threat model. While an actor with direct raw database access could rewrite mutable SQLite tables, our dual-layer reconciliation and exportable SHA-256 anchors (`GET /audit/anchor`) make any tampering immediately detectable.
-- **Exportable Anchor Checkpoints**: Exposes `GET /audit/anchor` which outputs the current block height, genesis hash, latest timestamp, and SHA-256 root state digest for periodic anchoring or external notarization.
-- Semantic product name and reference code search (`REF-XXXXXXXX`) via `lookup_order`.
-
+> **Interpretation note:** this is a *simulation* using the store's own affinity map, not measured production uplift. It shows the upsell logic respects budget constraints and attaches often; it does not predict real-world conversion. Reproduce with `python scripts/benchmark_aov.py` (output in [`benchmarks/aov_benchmark_results.json`](benchmarks/aov_benchmark_results.json)).
 
 ---
 
-## 🛠️ Model Context Protocol (MCP) Tool Suite
+## Audit Ledger
 
-The gateway exposes a comprehensive suite of **8 MCP tools** (plus identity resolution for local stdio) available over both **Remote Streamable HTTP** (`/mcp`) and **Local Stdio**:
+Every proposal, policy evaluation, confirmation, escalation, mandate change, and webhook event is appended to a SHA-256 hash chain (`prev_hash` → `record_hash`).
 
-| MCP Tool | Description | Inputs |
+- `GET /audit/verify` traverses the chain and reconciles it against the projection tables.
+- `GET /audit/anchor` exports the current block height, genesis hash, latest timestamp, and a SHA-256 root digest for periodic external anchoring or notarization.
+- Orders can be looked up by product name or reference code (`REF-XXXXXXXX`).
+
+**Threat model:** the chain is tamper-*evident* within the application's threat model. An actor with direct write access to the underlying database could rewrite mutable tables, but dual-layer reconciliation and externally stored anchors make such tampering detectable. It is not tamper-*proof*; see [limitations](#security-model-and-known-limitations).
+
+---
+
+## MCP Tools
+
+Available over **Remote Streamable HTTP** (`/mcp`, OAuth 2.1) and **local stdio**.
+
+| Tool | Purpose | Key inputs |
 |---|---|---|
-| 🔍 `inquire_merchant` | Consults Merchant Sales AI for product quotes, recommendations, or conversational order tracking. | `query`, `max_budget`, `category`, `quantity` |
-| 📦 `search_products` | Fast catalog search filtering by keyword, category, or maximum price. | `query`, `category`, `max_price` |
-| 💡 `suggest_addons` | Track 01 Revenue Growth tool finding cross-sell add-ons within remaining budget headroom. | `product_id`, `remaining_budget` |
-| 🛒 `propose_purchase` | Proposes a purchase evaluating deterministic spend policies, returning auto-pay, confirmation tokens, or checkout links. | `product_id`, `quantity`, `customer_id` (stdio) |
-| ✅ `confirm_purchase` | Finalizes payment rails for a gated transaction using the 5-minute confirmation token. | `confirmation_token`, `customer_id` (stdio) |
-| 📦 `check_order_status` | Queries the cryptographic audit ledger for payment settlement status and order reference codes (`REF-XXXXXXXX`). | `reference_or_id`, `customer_id` (stdio) |
-| 💳 `get_spending_mandate` | Inspects customer's active spending allowance, transaction caps, allowed categories, and authorized merchants. | `customer_id` (stdio) |
-| ⚙️ `modify_spending_mandate` | Requests conversational mandate adjustments with signed two-step human confirmation tokens (`confirmation_token`). | `new_limit`, `confirmation_token`, `customer_id` (stdio) |
-| 👤 `resolve_customer` *(stdio)* | Resolves human names or emails to internal authorized customer IDs. | `identifier` |
+| `inquire_merchant` | Ask the Merchant Sales AI for grounded quotes, recommendations, or order tracking | `query`, `max_budget`, `category`, `quantity` |
+| `search_products` | Fast catalog search | `query`, `category`, `max_price` |
+| `suggest_addons` | Cross-sell items within remaining budget headroom | `product_id`, `remaining_budget` |
+| `propose_purchase` | Submit a purchase to the policy engine; returns auto-pay, a confirmation token, or a checkout link | `product_id`, `quantity` |
+| `confirm_purchase` | Finalize a gated purchase with its 5-minute token | `confirmation_token` |
+| `check_order_status` | Query the ledger for settlement status and `REF-XXXXXXXX` | `reference_or_id` |
+| `get_spending_mandate` | Inspect limits, categories, and authorized merchants | none |
+| `modify_spending_mandate` | Request a limit change (two-step, token-confirmed) | `new_limit`, `confirmation_token` |
+| `resolve_customer` *(stdio only)* | Map a name or email to a customer ID | `identifier` |
+
+On stdio, tools also accept an explicit `customer_id`; over remote HTTP, identity comes from the OAuth token.
 
 ---
 
-## 🚀 Step-by-Step AI Client Setup Guide
+## REST API
 
-### 🔐 Gateway OAuth 2.1 Client Credentials & Endpoints
+Full OpenAPI spec at [`/openapi.json`](https://razorpay-c454.onrender.com/openapi.json), interactive docs at [`/docs`](https://razorpay-c454.onrender.com/docs).
 
-When connecting any external AI agent client (such as **Claude.ai**, **ChatGPT Custom Actions**, **Cursor**, or custom agent frameworks) using OAuth 2.0 / 2.1, use the following configuration parameters:
+| Area | Endpoints |
+|---|---|
+| Catalog | `GET /products`, `GET /products/{id}` |
+| Merchant AI | `POST /merchant/inquire`, `POST /merchant/recommend-addons` |
+| Agent purchasing | `POST /agent/purchase`, `POST /agent/confirm` |
+| Payments | `POST /payment/create-order`, `POST /payment/verify`, `POST /payment/webhook` |
+| Audit | `GET /audit`, `GET /audit/{tx_id}`, `GET /audit/verify`, `GET /audit/anchor` |
+| OAuth | `GET /oauth/authorize`, `POST /oauth/token`, `GET /.well-known/oauth-authorization-server` |
+| UI | `/admin/dashboard`, `/checkout` |
+| MCP | `/mcp` |
 
-| Parameter | Value | Description |
-|---|---|---|
-| **Client ID** | `claude-desktop-client` | Authorized Gateway Client Identifier |
-| **Client Secret** | `claude-demo-secret` | Gateway Client Secret (Basic or Post) |
-| **Authorization URL** | `https://razorpay-c454.onrender.com/oauth/authorize` | User Login, SSO & Authorization Consent Form |
-| **Token URL** | `https://razorpay-c454.onrender.com/oauth/token` | Exchange Authorization Code for JWT Access Token |
-| **Scope** | `purchase` | Required scope for AI buyer procurement |
-| **Token Auth Method** | `client_secret_post` / `client_secret_basic` | Supports both HTTP Basic Auth & Form POST body |
-| **RFC 8414 Discovery** | `https://razorpay-c454.onrender.com/.well-known/oauth-authorization-server` | Open discovery metadata for compliant clients |
-| **OpenAPI Specification** | `https://razorpay-c454.onrender.com/openapi.json` | Full schema for ChatGPT Actions / REST Agents |
-
----
-
-### Method A: Connect with Claude.ai (Web Remote MCP via OAuth)
-
-1. Open **[Claude.ai](https://claude.ai)** and navigate to **Settings** ➔ **Integrations / Connectors** (or **Custom Connectors**).
-2. Add a new MCP Server:
-   - **Server Name**: `RazorPay-Merchant`
-   - **Server URL**: `https://razorpay-c454.onrender.com/mcp`
-3. Click **Connect / Sign In**:
-   - Claude auto-discovers endpoints using RFC 8414 and opens the OAuth login portal (`https://razorpay-c454.onrender.com/oauth/authorize`).
-   - *(If Claude's connector setup asks for Client ID & Secret manually: enter `claude-desktop-client` and `claude-demo-secret`).*
-   - Log in with demo credentials (Username: `dinesh`, Password: `password123`), use **Continue with Google**, or create a new account.
-   - Click **Authorize Claude**.
-4. Claude now has access to all 8 gateway MCP tools with authenticated identity bound directly to your user account.
+`POST /payment/simulate-webhook` exists for testing only: it is admin-protected, disabled by default in production, and hidden from the production OpenAPI schema.
 
 ---
 
-### Method B: Connect with ChatGPT (Custom GPTs / OpenAI Actions)
+## Quick Start
 
-You can also transact through ChatGPT by creating a Custom GPT with OpenAI Actions:
+**Prerequisites:** Python 3.11+, a [Razorpay test-mode](https://dashboard.razorpay.com/) key pair, and a [Gemini API key](https://ai.google.dev/).
 
-1. In ChatGPT, open the **GPT Builder** (or **Explore GPTs** ➔ **Create**).
-2. Under **Configure**, click **Create new action**.
-3. In the **Schema** box, select **Import from URL** and enter:
-   ```
-   https://razorpay-c454.onrender.com/openapi.json
-   ```
-4. In the **Authentication** section:
-   - **Authentication Type**: Select `OAuth`.
-   - **Client ID**: `claude-desktop-client`
-   - **Client Secret**: `claude-demo-secret`
-   - **Authorization URL**: `https://razorpay-c454.onrender.com/oauth/authorize`
-   - **Token URL**: `https://razorpay-c454.onrender.com/oauth/token`
-   - **Scope**: `purchase`
-   - **Token Exchange Method**: Default (`POST` or `Basic`).
-5. Save the Action. When you chat with your Custom GPT, ChatGPT will prompt you to authenticate via the Gateway portal and gain authorized access to live catalog search, policy proposals, and order tracking.
+```bash
+# macOS / Linux
+git clone https://github.com/<your-username>/<repo-name>.git
+cd <repo-name>
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # then fill in your keys
+uvicorn app.main:app --reload
+```
+
+```powershell
+# Windows PowerShell
+git clone https://github.com/<your-username>/<repo-name>.git
+cd <repo-name>
+python -m venv .venv; .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env      # then fill in your keys
+uvicorn app.main:app --reload
+```
+
+The gateway is now at `http://localhost:8000`, with Swagger at `/docs`.
+
+### Run the 3-minute buyer journey
+
+```bash
+python scripts/demo_3min_buyer_journey.py
+```
+
+This walks the full flow in under a minute:
+
+1. **Natural-language procurement:** buyer asks for a barista-grade French press (budget ₹1,500); the merchant AI matches `HK005` (₹999) with catalog-grounded specs.
+2. **Headroom-aware add-on:** with ₹501 of headroom left, the growth engine recommends `FD007` Kumbakonam Filter Coffee (₹420), leaving an ₹81 buffer (a +42.0% lift *for this single basket*).
+3. **Policy gate:** the buyer proposes the purchase over OAuth 2.1; the engine decides between auto-pay and a single-use JWT confirmation.
+4. **Escalation:** a ₹4,999 monitor exceeds the mandate and escalates to a real Razorpay test-mode hosted checkout with link and QR.
+5. **Audit verification:** `GET /audit/verify` traverses the chain and reconciles the projection with zero tampering.
 
 ---
 
-### Method C: Connect with Claude Desktop (Local Stdio MCP)
+## Configuration
 
-1. Open your Claude Desktop configuration file:
-   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. Add the `razorpay-buyer-gateway` definition:
+Secrets are loaded from environment variables. **Default sandbox keys are rejected on startup in production mode.** See [`.env.example`](.env.example) for the complete list.
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | SQLite path (e.g. `gateway.db`) or a PostgreSQL URL |
+| `ADMIN_API_KEY` | Protects admin endpoints and the dashboard |
+| `GEMINI_API_KEY` | Merchant Sales AI (Gemini 2.5 Flash) |
+| `RAZORPAY_KEY_ID` | Razorpay test-mode key ID (`rzp_test_...`) |
+| `RAZORPAY_KEY_SECRET` | Razorpay test-mode secret |
+
+---
+
+## Connecting AI Clients
+
+**OAuth 2.1 parameters** (for any compliant client):
+
+| Parameter | Value |
+|---|---|
+| Authorization URL | `https://razorpay-c454.onrender.com/oauth/authorize` |
+| Token URL | `https://razorpay-c454.onrender.com/oauth/token` |
+| Scope | `purchase` |
+| Token auth method | `client_secret_post` or `client_secret_basic` |
+| Discovery (RFC 8414) | `https://razorpay-c454.onrender.com/.well-known/oauth-authorization-server` |
+
+### Claude.ai (remote MCP)
+
+1. Open **Settings → Connectors** and add a custom connector.
+2. Name it `RazorPay-Merchant` and set the URL to `https://razorpay-c454.onrender.com/mcp`.
+3. Click **Connect**. Claude discovers the OAuth endpoints automatically and opens the login portal.
+4. Sign in (demo account, Google SSO, or self-registration) and click **Authorize**.
+
+If the connector asks for client credentials manually, use the sandbox values in [Sandbox Credentials](#sandbox-credentials).
+
+### Claude Desktop (local stdio)
+
+Edit `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
 
 ```json
 {
   "mcpServers": {
     "razorpay-buyer-gateway": {
-      "command": "d:\\RazorPay\\.venv\\Scripts\\python.exe",
+      "command": "/path/to/.venv/bin/python",
       "args": ["-m", "app.mcp.server"],
       "env": {
         "DATABASE_URL": "gateway.db",
-        "ADMIN_API_KEY": "dev-admin-secret-key",
-        "GEMINI_API_KEY": "your_gemini_api_key_here",
-        "RAZORPAY_KEY_ID": "rzp_test_your_key_id",
-        "RAZORPAY_KEY_SECRET": "your_test_secret"
+        "ADMIN_API_KEY": "<your-admin-key>",
+        "GEMINI_API_KEY": "<your-gemini-key>",
+        "RAZORPAY_KEY_ID": "rzp_test_<id>",
+        "RAZORPAY_KEY_SECRET": "<your-test-secret>"
       }
     }
   }
 }
 ```
-3. Restart Claude Desktop. You will see the hammer icon 🔨 with all gateway tools enabled.
+
+On Windows, point `command` at `.venv\Scripts\python.exe`. Restart Claude Desktop; the tools appear under the hammer icon.
+
+### ChatGPT (Custom GPT Actions)
+
+1. In the GPT Builder, choose **Configure → Create new action**.
+2. Import the schema from `https://razorpay-c454.onrender.com/openapi.json`.
+3. Set authentication to **OAuth** using the parameters above.
+
+### Sandbox credentials
+
+> ⚠️ **Sandbox only.** These values exist for the public demo deployment and Razorpay *test mode*. Never reuse them for a real deployment; production mode rejects defaults at startup.
+
+| Item | Value |
+|---|---|
+| OAuth client ID / secret | `claude-desktop-client` / `claude-demo-secret` |
+| Demo user | `dinesh` / `password123` |
+| Admin dashboard key | `dev-admin-secret-key` |
 
 ---
 
-### 📋 Recommended Claude Custom Instructions (Copy & Paste)
+## Buyer Agent Instructions
 
-Paste this into **Claude Settings ➔ Custom Instructions** (or Project Instructions) to enable proactive Buyer Concierge behavior:
+Paste into **Claude Settings → Custom Instructions** (or Project Instructions) to enable proactive buyer-concierge behavior.
 
 ```markdown
 # Role: Autonomous AI Buyer & Commerce Concierge
@@ -332,7 +458,7 @@ You are my personal AI Buyer Agent connected to my Razorpay Merchant Store via M
    - If it is late at night (e.g., 11 PM – 2 AM) and I say "I'm hungry", search for ready-to-eat healthy snacks, roasted nuts, makhana, dark chocolate granola, or herbal teas from the `food` category.
    - If I mention work, productivity, or electronics, search for keyboards, mice, GaN chargers, or desk lamps (`electronics` / `home_kitchen`).
 
-3. **Value & Cross-Sell Recommendations (Track 01)**:
+3. **Value & Cross-Sell Recommendations**:
    - Use `suggest_addons` to discover complementary add-ons that fit within my budget mandate headroom.
    - Present a clear quote with Product Name, Price (₹ INR), and why it fits my current situation.
 
@@ -349,218 +475,157 @@ You are my personal AI Buyer Agent connected to my Razorpay Merchant Store via M
    - If I ask to adjust or raise my spending limit, call `modify_spending_mandate(new_limit=...)`. Always present the confirmation challenge to me clearly and call the tool again with `confirmation_token` only when I confirm.
 ```
 
----
-
-## 🧪 Live Test Scenarios for Judges
-
-### Scenario 1: Autonomous Micro-Purchase (< ₹500)
-> **Prompt**: *"I'm hungry at 1 AM. Suggest some late night snacks."*  
-> **What Happens**:
-> 1. Claude calls `inquire_merchant(query="late night snacks")`.
-> 2. Merchant AI recommends **Peri-Peri Roasted Foxnuts Makhana (₹179)**.
-> 3. Tell Claude: *"Order the Peri-Peri Makhana"*.
-> 4. Since ₹179 < ₹500, the Gateway auto-executes within the user's mandate and returns a Razorpay order confirmation instantly (`REF-XXXXXXXX` marked as `AUTO-PAID`).
-
-### Scenario 2: Two-Step Confirmation Gating (₹500 to ₹2,000)
-> **Prompt**: *"I want to buy a mechanical keyboard for coding."*  
-> **What Happens**:
-> 1. Claude calls `inquire_merchant(query="mechanical keyboard")` ➔ Finds `KB001` (₹1,499).
-> 2. Tell Claude: *"Yes, place the order"*.
-> 3. Claude calls `propose_purchase(product_id="KB001", quantity=1)`.
-> 4. Since ₹1,499 $\ge ₹500$, the Gateway generates a signed JWT token and returns `requires_confirmation: true`.
-> 5. Claude asks: *"Please confirm you want to proceed with charging ₹1,499 for the Mechanical Gaming Keyboard."*
-> 6. Type: *"Yes, confirm it"*.
-> 7. Claude calls `confirm_purchase(confirmation_token="...")` and mints the Razorpay order (`GATED-APPROVED`)!
-
-### Scenario 3: Mandate Escalation & Hosted Razorpay Checkout (> ₹2,000)
-> **Prompt**: *"Buy the 27-inch 4K Monitor."*  
-> **What Happens**:
-> 1. Claude finds `MN001` (₹4,999).
-> 2. Claude calls `propose_purchase(product_id="MN001")`.
-> 3. Gateway evaluates mandate limit (₹2,000 max) and identifies that the amount exceeds autonomous spend authority.
-> 4. Instead of a dead-end error, the gateway automatically generates a hosted checkout link (`https://razorpay-c454.onrender.com/checkout?order_id=...`) and UPI QR code.
-> 5. Claude presents the checkout link so the human can complete payment via UPI, Netbanking, or Card on `/checkout`!
-
-### Scenario 4: Smart Add-on & Cross-Sell Recommendation
-> **Prompt**: *"What complementary items can I add to my keyboard order?"*  
-> **What Happens**:
-> 1. Claude calls `suggest_addons(product_id="KB001", remaining_budget=500.0)`.
-> 2. Merchant AI suggests the **Braided USB-C Fast Charging Cable (₹399)** fitting precisely within the ₹500 headroom.
-
-### Scenario 5: Order Status & Fulfillment Tracking
-> **Prompt**: *"Did my keyboard order go through? What is the status?"*  
-> **What Happens**:
-> 1. Claude calls `check_order_status(reference_or_id="KB001")`.
-> 2. Gateway retrieves the audit ledger record, confirms payment status as captured/paid, and reports:  
->    `"Merchant confirmation: Order REF-XXXXXXXX for 1x Mechanical Gaming Keyboard (₹1,499.00) is CONFIRMED & PAID via Razorpay rails."`
-
-### Scenario 6: Conversational Spending Mandate Adjustment (Two-Step Human Gated)
-> **Prompt**: *"What is my spending limit, and can you raise it to ₹5,000?"*  
-> **What Happens**:
-> 1. Claude calls `get_spending_mandate()` and reports: `"Your current spending limit is ₹2,000.00."`
-> 2. Claude calls `modify_spending_mandate(new_limit=5000.0)`.
-> 3. The Gateway issues a signed confirmation challenge:  
->    `"You are requesting to update your AI spending mandate from ₹2,000.00 to ₹5,000.00. Please confirm: Do you authorize this change?"`
-> 4. Claude presents the challenge to the user.
-> 5. Type: *"Yes, I authorize it"*.
-> 6. Claude calls `modify_spending_mandate(new_limit=5000.0, confirmation_token="...")`.
-> 7. The gateway updates the customer mandate in the database and logs a tamper-evident audit record (`CUSTOMER_MANDATE_UPDATED_CONVERSATIONAL`)!
+> These instructions improve agent behavior, but they are not the safety boundary. Even a misbehaving agent cannot exceed the mandate: enforcement lives in the gateway.
 
 ---
 
-## 📊 Admin Command Centre & Live Telemetry
+## Demo Scenarios
 
-Access the live dashboard at **`https://razorpay-c454.onrender.com/admin/dashboard`**:
-
-- **Sliding Collapsible Navigation**: Smooth sliding sidebar with top-aligned navigation items, floating collapsed icon tooltips, and keyboard shortcut support (`Ctrl+B`).
-- **Tab 1: Overview**:
-  - Executive KPI Cards: Total Approved Volume (₹ INR), Total Proposals Evaluated, Policy Approval Rate (%), and Active Mandates.
-  - Full-Width Recent Transactions Table: Real-time records with sleek pill status badges (`AUTO-PAID`, `GATED-APPROVED`, `PENDING-PAYMENT`, `REJECTED`).
-- **Tab 2: Analytics & Insights (Track 01 Deep Telemetry)**:
-  - Metric summary: Approved & Settled volume, Policy Interceptions (overspending prevented), Autonomous Auto-Pay (< ₹500), and Two-Step Human Gated (≥ ₹500).
-  - Chronological Revenue Progression: Interactive Chart.js area chart mapping exact real database records in PostgreSQL / SQLite.
-  - Auto-Pay vs Human Gated Distribution: Visual doughnut chart showing proportion of autonomous micro-payments vs JWT-confirmed volume.
-  - Policy Enforcement & Risk Interception: Verifiable proof of deterministic spend control preventing financial hazards.
-- **Tab 3: Audit Trail**:
-  - Append-only cryptographic ledger with SHA-256 hash chaining (`prev_hash` $\rightarrow$ `record_hash`).
-  - Cryptographic verification badge (`VALID LEDGER CHAIN`) and one-click export of the signed ledger checkpoint anchor (`GET /audit/anchor`).
-- **Tab 4: Mandates & Auth**:
-  - Inspect customer spending policies, per-transaction limits, daily allowances, allowed merchant IDs, and allowed product categories.
-  - Live customer provisioning modal to create new customer accounts and mandates on the fly.
-- **Tab 5: Store Catalog**:
-  - Searchable multi-merchant catalog across 48 products in Foods, Electronics, Home & Kitchen, and Apparel with real-time stock indicators.
-- **Tab 6: Agent Sandbox**:
-  - Interactive simulator allowing judges to test natural language inquiries, purchase proposals, human approval gating, and token confirmations in a single click.
+| # | Prompt | What happens |
+|---|---|---|
+| 1 | *"I'm hungry at 1 AM. Suggest some late night snacks."* then *"Order the Peri-Peri Makhana"* | `inquire_merchant` recommends Peri-Peri Roasted Foxnuts Makhana (₹179). Under ₹500, so it auto-executes and returns `REF-XXXXXXXX` (`AUTO-PAID`). |
+| 2 | *"I want to buy a mechanical keyboard for coding."* then *"Yes, place the order"* | Finds `KB001` (₹1,499). `propose_purchase` returns a confirmation token. After *"Yes, confirm it"*, `confirm_purchase` mints the order (`GATED-APPROVED`). |
+| 3 | *"Buy the 27-inch 4K Monitor."* | `MN001` (₹4,999) exceeds the ₹2,000 mandate, so the gateway returns a hosted checkout link and UPI QR instead of an error. |
+| 4 | *"What complementary items can I add to my keyboard order?"* | `suggest_addons(KB001, 500)` returns the Braided USB-C Fast Charging Cable (₹399), which fits the ₹500 headroom. |
+| 5 | *"Did my keyboard order go through?"* | `check_order_status` reads the ledger and reports the order reference, amount, and payment status. |
+| 6 | *"What's my spending limit, and can you raise it to ₹5,000?"* | `get_spending_mandate` reports ₹2,000. `modify_spending_mandate(5000)` returns a signed challenge; after *"Yes, I authorize it"*, the mandate updates and the change is logged. |
 
 ---
 
-## 🧪 Test Suite Verification
+## Admin Command Centre
 
-The repository includes **167 automated unit and integration tests with a 100% pass rate**:
+Open [`/admin/dashboard`](https://razorpay-c454.onrender.com/admin/dashboard) and authenticate with the admin key.
 
-```powershell
-.venv\Scripts\python.exe -m pytest tests/ -v
-```
+| Tab | Contents |
+|---|---|
+| **Overview** | KPI cards (approved volume, proposals evaluated, approval rate, active mandates) and a live transactions table with status pills |
+| **Analytics** | Revenue progression chart, auto-pay vs. human-gated split, and policy interceptions (overspend prevented) |
+| **Audit Trail** | Hash-chained ledger, a ledger-validity badge, and one-click anchor export |
+| **Mandates & Auth** | Per-customer limits, daily allowances, allowed merchants and categories, plus a customer provisioning modal |
+| **Store Catalog** | Searchable multi-merchant catalog (48 products) with live stock indicators |
+| **Agent Sandbox** | Simulate inquiries, proposals, approvals, and token confirmations without an external AI client |
 
-```
-============================== 167 passed in 90s ==============================
-- tests/test_mcp.py                    : 26 passed (Local STDIO tools, confirmation gating, check_order_status, idempotency)
-- tests/test_policy_engine.py          : 25 passed (Boundary limits, expiry, category whitelists, daily caps)
-- tests/test_payments.py               : 22 passed (Razorpay orders, webhooks, persistent DB dedup, stock restore, payment links)
-- tests/test_agent_router.py           : 16 passed (Auth-protected purchasing, confirmation tokens, replay immunity)
-- tests/test_oauth.py                  : 16 passed (JWT tokens, PBKDF2 hashing, refresh grants, sub claims)
-- tests/test_admin.py                  : 13 passed (Mandate updates, customer provisioning, admin security)
-- tests/test_merchant_agent.py         : 10 passed (Gemini LLM reasoning, quote grounding, add-on recommendations)
-- tests/test_audit.py                  : 9 passed  (Hash-chained, tamper-evident audit ledger with exportable anchors, GET /audit/anchor)
-- tests/test_catalog.py                : 9 passed  (Product filtering, multi-token search, 48-product catalog)
-- tests/test_mcp_remote.py             : 8 passed  (Streamable HTTP, auth headers, token isolation)
-- tests/test_customer_mandate.py       : 5 passed  (Conversational mandate queries, two-step human gating tokens)
-- tests/test_google_oauth_and_signup.py: 5 passed  (Google SSO redirect, self-service registration, auto-provisioning)
-- tests/test_dashboard.py              : 3 passed  (HTML dashboard, static CSS/JS serving)
-
-```
+Keyboard shortcut: `Ctrl+B` toggles the sidebar.
 
 ---
 
-## 📦 Project Structure
-
-```
-RazorPay/
-├── app/
-│   ├── main.py                  # FastAPI app entrypoint, CORS, routers & MCP mounting
-│   ├── auth.py                  # OAuth JWT & Admin API key authentication dependencies
-│   ├── db.py                    # Universal SQLite & PostgreSQL database access layer
-│   ├── exceptions.py            # Transport-agnostic domain exceptions
-│   ├── admin/
-│   │   ├── models.py            # Admin customer & mandate request schemas
-│   │   └── router.py            # Admin customer management & mandate update endpoints
-│   ├── catalog/
-│   │   ├── models.py            # Product Pydantic schema
-│   │   ├── data.py              # 48 products across Foods, Electronics, Home & Apparel
-│   │   ├── service.py           # Catalog search, lookup, and stock management
-│   │   └── router.py            # GET /products, GET /products/{id}
-│   ├── agent/
-│   │   ├── service.py           # Purchase orchestration, confirmation tokens, stock decrement
-│   │   └── router.py            # POST /agent/purchase, POST /agent/confirm
-│   ├── merchant_agent/
-│   │   ├── models.py            # InquiryRequest, ProductQuote, AddOnRecommendation schemas
-│   │   ├── llm.py               # Gemini 2.5 Flash SDK client wrapper
-│   │   ├── service.py           # Gemini reasoning, quote grounding & smart add-on engine
-│   │   └── router.py            # POST /merchant/inquire, POST /merchant/recommend-addons
-│   ├── mcp/
-│   │   ├── tools.py             # 8 MCP tools (propose, confirm, suggest_addons, check_status, mandates)
-│   │   └── server.py            # Local STDIO & Remote Streamable HTTP MCP server (/mcp)
-│   ├── policy/
-│   │   ├── mandate.py           # Mandate schema (max_transaction_amount, daily_limit, expiry)
-│   │   ├── engine.py            # Pure evaluate() deterministic rule engine
-│   │   ├── requests.py          # PurchaseRequest & PolicyDecision models
-│   │   └── store.py             # SQLite/PostgreSQL customer mandate store
-│   ├── payment/
-│   │   ├── models.py            # PaymentResult Pydantic model
-│   │   ├── razorpay_client.py   # Razorpay SDK wrapper & HMAC signature verification
-│   │   ├── service.py           # Order creation with paise conversion & payment link generator
-│   │   └── router.py            # POST /payment/webhook, /payment/verify, /payment/create-order
-│   ├── oauth/
-│   │   ├── models.py            # OAuth schemas & customer credentials
-│   │   ├── crypto.py            # PBKDF2 hashing, JWT access & refresh token signing
-│   │   ├── store.py             # OAuth credentials, code & refresh token store
-│   │   └── router.py            # /oauth/authorize, /oauth/token, /.well-known endpoints
-│   └── audit/
-│       ├── models.py            # AuditRecord schema with SHA-256 prev_hash & record_hash
-│       ├── store.py             # Append-only ledger store with order lookup & anchor digest
-│       └── router.py            # GET /audit, GET /audit/{tx_id}, GET /audit/verify, GET /audit/anchor
-├── scripts/
-│   ├── benchmark_aov.py         # 50-session empirical AOV lift benchmark runner (+40.8% lift)
-│   ├── demo_gemini_grounding.py # Interactive live Gemini reasoning & catalog grounding demo
-│   └── verify_live_razorpay.py  # Live Razorpay Test Mode end-to-end API lifecycle verification
-├── benchmarks/
-│   └── aov_benchmark_results.json # Empirical benchmark dataset (47 evaluated sessions)
-├── static/
-│   ├── admin/                   # Admin Command Centre UI (HTML, CSS, JS with Chart.js)
-│   └── checkout/                # Standalone Razorpay Checkout & UPI QR Code UI
-├── tests/                       # 187 automated unit & integration tests (100% pass)
-├── .env.example                 # Environment variables template (clean placeholders)
-├── requirements.txt             # Pinned project dependencies
-└── README.md                    # Master Project Documentation
-```
-
----
-
-## 🛠️ Fresh Clone Reproduction (One-Command Verification)
-
-Run this single command from a fresh clone on Windows or Linux to set up the isolated environment and execute the entire 187-test suite:
-
-```powershell
-# Windows PowerShell (Fresh Clone):
-python -m venv .venv; .\.venv\Scripts\Activate.ps1; pip install -r requirements.txt; pytest
-```
+## Testing
 
 ```bash
-# macOS / Linux (Fresh Clone):
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt && pytest
+pytest tests/ -v
 ```
 
-To run individual verification scripts:
-```powershell
-# 1. Run Empirical Revenue Growth Benchmark (50 synthetic sessions):
-python scripts/benchmark_aov.py
+Current result: **167 passed**.
 
-# 2. Run Gemini Reasoning & Catalog Anti-Hallucination Demo:
-python scripts/demo_gemini_grounding.py
+| Suite | Tests | Covers |
+|---|---:|---|
+| `test_mcp.py` | 26 | Stdio tools, confirmation gating, order status, idempotency |
+| `test_policy_engine.py` | 25 | Boundary limits, expiry, category whitelists, daily caps |
+| `test_payments.py` | 22 | Orders, webhooks, persistent dedup, stock restore, payment links |
+| `test_agent_router.py` | 16 | Authenticated purchasing, confirmation tokens, replay immunity |
+| `test_oauth.py` | 16 | JWT tokens, PBKDF2 hashing, refresh grants, `sub` claims |
+| `test_admin.py` | 13 | Mandate updates, customer provisioning, admin security |
+| `test_merchant_agent.py` | 10 | Gemini reasoning, quote grounding, add-ons |
+| `test_audit.py` | 9 | Hash chain, tamper evidence, anchor endpoint |
+| `test_catalog.py` | 9 | Filtering, multi-token search, 48-product catalog |
+| `test_mcp_remote.py` | 8 | Streamable HTTP, auth headers, token isolation |
+| `test_customer_mandate.py` | 5 | Conversational mandate queries and two-step tokens |
+| `test_google_oauth_and_signup.py` | 5 | Google SSO redirect, registration, auto-provisioning |
+| `test_dashboard.py` | 3 | HTML dashboard, static assets |
 
-# 3. Run Live Razorpay Test Mode Order & Signature Lifecycle:
-python scripts/verify_live_razorpay.py
+Live-rails tests (`test_live_razorpay_checkout.py`, `test_gemini_grounding.py`) call external services and need valid keys.
+
+---
+
+## Project Structure
+
+```
+.
+├── app/
+│   ├── main.py              # FastAPI entrypoint, CORS, routers, MCP mounting
+│   ├── auth.py              # OAuth JWT and admin API key dependencies
+│   ├── db.py                # SQLite / PostgreSQL access layer
+│   ├── exceptions.py        # Transport-agnostic domain exceptions
+│   ├── admin/               # Customer management and mandate updates
+│   ├── catalog/             # Product schema, 48-product dataset, search, stock
+│   ├── agent/               # Purchase orchestration, confirmation tokens
+│   ├── merchant_agent/      # Gemini client, quote grounding, add-on engine
+│   ├── mcp/                 # MCP tools; stdio and remote HTTP servers
+│   ├── policy/              # Mandate schema, pure evaluate() engine, store
+│   ├── payment/             # Razorpay wrapper, HMAC verification, order/link creation
+│   ├── oauth/               # OAuth 2.1 flows, PBKDF2, JWT signing, stores
+│   └── audit/               # Hash-chained ledger, verify, anchor
+├── scripts/
+│   ├── demo_3min_buyer_journey.py
+│   ├── benchmark_aov.py
+│   ├── demo_gemini_grounding.py
+│   └── verify_live_razorpay.py
+├── benchmarks/
+│   └── aov_benchmark_results.json
+├── static/
+│   ├── admin/               # Command Centre UI
+│   └── checkout/            # Hosted checkout and UPI QR UI
+├── tests/
+├── .env.example
+├── requirements.txt
+└── README.md
 ```
 
+---
 
-## 🏆 Summary of Hackathon Evaluation Strengths
+## Security Model and Known Limitations
 
-| Criterion | Evaluation Strength |
+**What the design guarantees**
+
+- The LLM cannot approve, price, or execute a purchase; the deterministic engine and database are the sources of truth.
+- Agent identity comes from a verified OAuth JWT, not from client-supplied parameters (remote transport).
+- Confirmation tokens are signed, short-lived (5 minutes), and replay-protected.
+- Mandates are re-evaluated at execution time, not only at proposal time.
+- Webhooks are signature-verified and deduplicated.
+
+**Known limitations (be aware before adopting)**
+
+- **Test-mode payments only.** Live-mode operation has not been validated.
+- **Tier 1 settlement is simulated** against a sandbox wallet; no real funds move for autonomous micro-purchases.
+- **Audit ledger is tamper-evident, not tamper-proof.** Direct database write access can rewrite state; protection depends on exporting and storing anchors externally.
+- **AOV lift is simulated** on synthetic sessions, not measured on real traffic.
+- **Demo credentials are public** and must never be used outside the sandbox.
+- **Single-merchant-gateway assumptions** in places (catalog is multi-merchant, but operational tooling targets one operator).
+
+---
+
+## Roadmap
+
+- [ ] Real settlement path for Tier 1 (Razorpay mandates / UPI AutoPay)
+- [ ] Periodic automatic anchoring of the audit ledger to external storage
+- [ ] Per-category and per-merchant spend caps within a mandate
+- [ ] Rate limiting and anomaly detection on agent proposals
+- [ ] Measured (A/B) upsell evaluation on real sessions
+- [ ] Mandate templates and delegated sub-mandates for multi-agent setups
+- [ ] Observability: structured logs and metrics export
+
+---
+
+## Hackathon Context
+
+Built for the **Razorpay Buildathon, Track 01 (Agent-to-Agent commerce)**. How it maps to common evaluation criteria:
+
+| Criterion | Where to look |
 |---|---|
-| **Track Fit & Originality** | Full **Track 01 Agent-to-Agent (A2A)** architecture: turns merchant catalogs into transactable AI-buyable storefronts with guided selling, live add-on upsells (+40.8% empirical AOV lift), and recovered checkout intent. |
-| **End-to-End Execution** | Connected flow from natural language inquiry $\rightarrow$ Gemini grounded quote $\rightarrow$ policy mandate check $\rightarrow$ human confirmation token / hosted checkout link $\rightarrow$ Razorpay order minting $\rightarrow$ webhook capture $\rightarrow$ order status tracking. |
-| **Merchant Revenue Growth** | Active add-on upsell recommendations (`suggest_addons`) maximizing basket size within remaining budget headroom, empirically verified across 47 sessions (+40.8% AOV lift) in `scripts/benchmark_aov.py`. |
-| **Safety & Controls** | Deterministic 6-tier policy engine, signed 5-minute JWT confirmation tokens, token replay immunity, pre-execution policy re-validation, server-authorized order creation, and mandate escalation links. |
-| **Razorpay Implementation & Truthful Settlement** | Server-authorized checkout gating (`/payment/create-order`), strict HMAC-SHA256 signature verification with failure UI, truthful settlement state tracking (`MANDATE_SETTLED` vs `ORDER_MINTED` vs `CAPTURED`), persistent database webhook deduplication (`payment.captured` and `payment_link.paid`), automated stock restoration, and hosted `/checkout` interface. |
-| **Audit & Governance** | Hash-chained tamper-evident SHA-256 ledger (`GET /audit/verify`, `GET /audit/anchor`) with exportable state digests and real-time Admin Command Centre telemetry. |
-| **Engineering Quality** | 187 tests passing (100%), full type annotations, dual transport MCP (Local Stdio + Remote HTTP), and PostgreSQL/SQLite universal compatibility. |
+| Track fit and originality | Merchant AI plus buyer AI loop; guided selling and add-on upsell |
+| End-to-end execution | Inquiry → grounded quote → policy → token or checkout → Razorpay order → webhook → status |
+| Merchant revenue growth | `suggest_addons`, `scripts/benchmark_aov.py` |
+| Safety and controls | Policy engine, signed tokens, replay immunity, re-validation, escalation links |
+| Razorpay implementation | Paise conversion, HMAC verification, hosted checkout, webhook dedup, stock compensation |
+| Audit and governance | `/audit/verify`, `/audit/anchor`, Command Centre |
+| Engineering quality | 167 passing tests, typed code, dual-transport MCP, SQLite/PostgreSQL |
+
+---
+
+## License and Author
+
+**License:** _add a license (e.g. MIT) and a `LICENSE` file._
+
+**Author:** Surya S · [@SuryaSK-dev](https://github.com/SuryaSK-dev)
+
+Issues and pull requests are welcome. Please run `pytest` before submitting changes.
