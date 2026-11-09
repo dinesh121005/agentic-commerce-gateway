@@ -465,17 +465,49 @@ def get_spending_mandate_handler(customer_id: Optional[str] = None) -> Dict[str,
     """
     Checks the active spending mandate, per-transaction limit, and allowed categories for a customer.
     Allows the AI Buyer in conversation to answer user questions about their budget.
+
+    Identity Isolation Rules (Pre-P0 Hardening):
+    - An authenticated customer context (authenticated_customer_id) is strictly authoritative.
+    - If NO authenticated customer context exists, unauthenticated/arbitrary inspection is blocked:
+      returns UNAUTHORIZED. No default identity (e.g. 'CUST001') is ever assumed.
+    - If an authenticated customer context exists, caller-supplied customer_id must match it;
+      mismatches are rejected with FORBIDDEN.
     """
-    effective_id = customer_id or "CUST001"
+    auth_id = authenticated_customer_id.get()
+    if not auth_id:
+        logger.warning(
+            "Unauthenticated mandate inspection attempt: caller attempted "
+            f"to access mandate (supplied customer_id: '{customer_id}') without authenticated session."
+        )
+        return {
+            "mandate_found": False,
+            "status": "UNAUTHORIZED",
+            "error": "Authentication required: No verified customer identity in session.",
+        }
+
+    if customer_id and customer_id != auth_id:
+        logger.warning(
+            f"Customer ID mismatch in get_spending_mandate: caller supplied '{customer_id}' "
+            f"but authenticated session is '{auth_id}'."
+        )
+        return {
+            "mandate_found": False,
+            "status": "FORBIDDEN",
+            "error": f"Access denied: caller-supplied customer_id '{customer_id}' does not match authenticated identity '{auth_id}'.",
+        }
+
+    effective_id = auth_id
     mandate = mandate_store.get_mandate(effective_id)
     if not mandate:
         return {
             "mandate_found": False,
+            "status": "NOT_FOUND",
             "message": f"No spending mandate found for customer '{effective_id}'.",
         }
 
     return {
         "mandate_found": True,
+        "status": "SUCCESS",
         "customer_id": mandate.customer_id,
         "display_name": mandate.display_name,
         "currency": mandate.currency or "INR",
@@ -490,7 +522,7 @@ def get_spending_mandate_handler(customer_id: Optional[str] = None) -> Dict[str,
         "message": (
             f"Your current AI spending mandate allows purchases up to ₹{mandate.max_transaction_amount:,.2f} "
             f"for {', '.join(mandate.allowed_categories)} from merchants {', '.join(mandate.allowed_merchants)}. "
-            f"You can request to modify your limit, authorize new merchants, or authorize new categories directly in this conversation."
+            f"Spending mandates are read-only for AI agents."
         ),
     }
 
@@ -504,192 +536,42 @@ def modify_spending_mandate_handler(
 ) -> Dict[str, Any]:
     """
     Conversational Spending Mandate Update:
-    Allows the human user in conversation to modify their AI agent's spending mandate limit,
-    authorize a new merchant, or authorize a new product category.
-    Enforces a strict Two-Step Human Gating Protocol:
-    - Step 1: Without confirmation_token, creates a signed confirmation challenge for the human user.
-    - Step 2: Once the human user explicitly confirms in chat, execute with confirmation_token.
+    DISABLED FOR SECURITY CONTAINMENT (VULN-05 / ADR-03).
+
+    Security Invariant:
+    An external AI agent must never be able to increase, extend, or otherwise escalate
+    a customer's spending authority through conversational tool calls.
+    All conversational mandate modification attempts fail closed with FORBIDDEN.
+    Spending mandates may only be configured through authenticated administrative
+    or customer self-service portals.
     """
-    effective_id = customer_id or "CUST001"
-    mandate = mandate_store.get_mandate(effective_id)
-    if not mandate:
-        return {
-            "success": False,
-            "error": f"Mandate for customer '{effective_id}' not found.",
-        }
-
-    clean_merchant = add_merchant.strip() if add_merchant and add_merchant.strip() else None
-    clean_category = add_category.strip() if add_category and add_category.strip() else None
-
-    target_limit: Optional[float] = None
-    if new_limit is not None and str(new_limit).strip() != "":
-        try:
-            target_limit = round(float(new_limit), 2)
-        except (ValueError, TypeError):
-            return {
-                "success": False,
-                "error": "Invalid limit amount specified.",
-            }
-
-        if target_limit < 100.0:
-            return {
-                "success": False,
-                "error": "Minimum spending mandate limit is ₹100.00.",
-            }
-        if target_limit > 50000.0:
-            return {
-                "success": False,
-                "error": "Maximum allowable autonomous spending limit is ₹50,000.00.",
-            }
-
-    if not confirmation_token and target_limit is None and not clean_merchant and not clean_category:
-        return {
-            "success": False,
-            "error": "No mandate modification specified. Please specify a new_limit, add_merchant, or add_category.",
-        }
-
-    # Step 1: Human Confirmation Challenge
-    if not confirmation_token:
-        token = generate_mandate_confirmation_token(
-            customer_id=effective_id,
-            new_limit=target_limit,
-            add_merchant=clean_merchant,
-            add_category=clean_category,
-        )
-
-        prompt_parts = []
-        if target_limit is not None and abs(target_limit - mandate.max_transaction_amount) > 0.01:
-            prompt_parts.append(f"spending limit from ₹{mandate.max_transaction_amount:,.2f} to ₹{target_limit:,.2f}")
-        if clean_merchant:
-            prompt_parts.append(f"authorize merchant '{clean_merchant}'")
-        if clean_category:
-            prompt_parts.append(f"authorize category '{clean_category}'")
-
-        changes_desc = ", ".join(prompt_parts) if prompt_parts else "update mandate"
-
-        return {
-            "requires_confirmation": True,
-            "status": "AWAITING_HUMAN_CONFIRMATION",
-            "customer_id": effective_id,
-            "current_limit": mandate.max_transaction_amount,
-            "proposed_limit": target_limit if target_limit is not None else mandate.max_transaction_amount,
-            "proposed_add_merchant": clean_merchant,
-            "proposed_add_category": clean_category,
-            "confirmation_token": token,
-            "human_prompt": (
-                f"You are requesting to {changes_desc}. "
-                f"Please confirm: Do you authorize this change?"
-            ),
-            "instructions": (
-                "Present the human_prompt to the user. Ask them explicitly to confirm. "
-                "Only call modify_spending_mandate again with the confirmation_token once the user confirms."
-            ),
-        }
-
-    # Step 2: Confirmation Token Execution
-    try:
-        payload = decode_mandate_confirmation_token(confirmation_token)
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Invalid or expired confirmation token: {str(e)}",
-        }
-
-    token_cust = payload.get("sub")
-    if token_cust != effective_id:
-        return {
-            "success": False,
-            "error": "Token customer mismatch. Security verification failed.",
-        }
-
-    signed_limit = payload.get("new_limit")
-    signed_merchant = payload.get("add_merchant")
-    signed_category = payload.get("add_category")
-
-    # Update database
-    mandate_store.update_mandate(
-        customer_id=effective_id,
-        new_limit=signed_limit,
-        add_merchant=signed_merchant,
-        add_category=signed_category,
-    )
-
-    # PERSISTENCE VERIFICATION: Reload from storage and verify state!
-    verified_mandate = mandate_store.get_mandate(effective_id)
-    if not verified_mandate:
-        return {
-            "success": False,
-            "status": "PERSISTENCE_VERIFICATION_FAILED",
-            "error": f"Mandate for customer '{effective_id}' could not be reloaded from storage.",
-        }
-
-    if signed_limit is not None and abs(verified_mandate.max_transaction_amount - signed_limit) > 0.01:
-        return {
-            "success": False,
-            "status": "PERSISTENCE_VERIFICATION_FAILED",
-            "error": "Persisted mandate limit does not match requested limit.",
-        }
-
-    if signed_merchant and not any(m.upper() == signed_merchant.upper() for m in verified_mandate.allowed_merchants):
-        return {
-            "success": False,
-            "status": "PERSISTENCE_VERIFICATION_FAILED",
-            "error": f"Merchant '{signed_merchant}' was not found in persisted allowed_merchants list.",
-        }
-
-    if signed_category and not any(c.lower() == signed_category.lower() for c in verified_mandate.allowed_categories):
-        return {
-            "success": False,
-            "status": "PERSISTENCE_VERIFICATION_FAILED",
-            "error": f"Category '{signed_category}' was not found in persisted allowed_categories list.",
-        }
-
-    # Log audit event
-    try:
-        audit_store.log_event(
-            event_type="CUSTOMER_MANDATE_UPDATED_CONVERSATIONAL",
-            transaction_id=f"MANDATE-{effective_id}",
-            payload={
-                "customer_id": effective_id,
-                "previous_limit": mandate.max_transaction_amount,
-                "new_limit": verified_mandate.max_transaction_amount,
-                "added_merchant": signed_merchant,
-                "added_category": signed_category,
-                "allowed_merchants": verified_mandate.allowed_merchants,
-                "allowed_categories": verified_mandate.allowed_categories,
-                "method": "CONVERSATIONAL_TWO_STEP_HUMAN_CONSENT",
-            }
-        )
-    except Exception:
-        pass
-
-    msg_parts = [f"spending limit: ₹{verified_mandate.max_transaction_amount:,.2f}"]
-    if signed_merchant:
-        msg_parts.append(f"authorized merchant: {signed_merchant}")
-    if signed_category:
-        msg_parts.append(f"authorized category: {signed_category}")
-
+    logger.warning("Blocked conversational mandate modification attempt: VULN-05 containment active.")
     return {
-        "success": True,
-        "status": "APPROVED_AND_UPDATED",
-        "customer_id": effective_id,
-        "previous_limit": mandate.max_transaction_amount,
-        "new_limit": verified_mandate.max_transaction_amount,
-        "allowed_merchants": verified_mandate.allowed_merchants,
-        "allowed_categories": verified_mandate.allowed_categories,
-        "added_merchant": signed_merchant if signed_merchant else None,
-        "added_category": signed_category if signed_category else None,
-        "message": (
-            f"✅ Spending mandate successfully updated ({', '.join(msg_parts)}). "
-            f"Your AI buyer agent can now transact under this updated mandate."
+        "success": False,
+        "status": "FORBIDDEN",
+        "error": (
+            "Conversational spending mandate modification is disabled for security (VULN-05 containment). "
+            "AI agents cannot modify or escalate customer spending mandates. "
+            "Spending mandates must be configured through authenticated administrative or customer self-service channels."
         ),
     }
 
 
 def get_spending_mandate_remote_handler() -> Dict[str, Any]:
-    """Remote handler checking mandate bound to authenticated OAuth customer."""
-    customer_id = authenticated_customer_id.get() or "CUST001"
-    return get_spending_mandate_handler(customer_id=customer_id)
+    """
+    Remote handler checking mandate bound exclusively to authenticated OAuth customer.
+    Derives customer identity strictly from verified OAuth context.
+    Fails closed with UNAUTHORIZED if no authenticated identity exists.
+    """
+    auth_id = authenticated_customer_id.get()
+    if not auth_id:
+        logger.warning("Unauthenticated remote mandate inspection attempt.")
+        return {
+            "mandate_found": False,
+            "status": "UNAUTHORIZED",
+            "error": "Authentication required: No verified customer identity in session.",
+        }
+    return get_spending_mandate_handler(customer_id=auth_id)
 
 
 def modify_spending_mandate_remote_handler(
@@ -698,15 +580,24 @@ def modify_spending_mandate_remote_handler(
     add_category: Optional[str] = None,
     confirmation_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Remote handler updating mandate bound to authenticated OAuth customer."""
-    customer_id = authenticated_customer_id.get() or "CUST001"
-    return modify_spending_mandate_handler(
-        new_limit=new_limit,
-        add_merchant=add_merchant,
-        add_category=add_category,
-        confirmation_token=confirmation_token,
-        customer_id=customer_id,
-    )
+    """
+    Remote handler for spending mandate updates.
+
+    PRE-P0 SECURITY CONTAINMENT (VULN-05 / ADR-03):
+    External AI agents connecting over MCP are strictly prohibited from
+    modifying spending mandates or receiving mandate confirmation tokens.
+    Fails closed with FORBIDDEN.
+    """
+    logger.warning("Blocked remote mandate modification attempt: VULN-05 containment active.")
+    return {
+        "success": False,
+        "status": "FORBIDDEN",
+        "error": (
+            "Mandate modification via remote AI agents is disabled for security (VULN-05 containment). "
+            "Spending mandates may only be configured through authenticated administrative or customer "
+            "self-service portals."
+        ),
+    }
 
 
 def register_tools(server: MCPServer) -> None:
@@ -734,45 +625,16 @@ def register_tools(server: MCPServer) -> None:
     @server.tool(
         name="get_spending_mandate",
         description=(
-            "Inspect the customer's current active spending mandate, per-transaction spending limit, "
+            "Inspect the authenticated customer's current active spending mandate, per-transaction spending limit, "
             "allowed product categories, and authorized merchants. Call this whenever the user asks about "
             "their budget, asks how much they can spend, or checks their purchase allowance."
         )
     )
     def get_spending_mandate_tool(
-        customer_id: str = "CUST001",
+        customer_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Inspect the customer's active spending mandate."""
         return get_spending_mandate_handler(customer_id=customer_id)
-
-    @server.tool(
-        name="modify_spending_mandate",
-        description=(
-            "Modify the customer's spending mandate (spending limit, allowed merchants, or allowed categories) "
-            "directly within the conversation. "
-            "Call this when the user asks to change their limit (e.g. 'increase limit to 5000'), "
-            "authorize a new merchant (e.g. 'add MERCH_NET to allowed merchants'), "
-            "or authorize a new category (e.g. 'add networking to allowed categories'). "
-            "Protocol Guard: If confirmation_token is not provided, this returns a confirmation challenge "
-            "that you MUST present to the human user. Call this tool again with confirmation_token only after "
-            "the user says YES."
-        )
-    )
-    def modify_spending_mandate_tool(
-        new_limit: Optional[float] = None,
-        add_merchant: Optional[str] = None,
-        add_category: Optional[str] = None,
-        confirmation_token: Optional[str] = None,
-        customer_id: str = "CUST001",
-    ) -> Dict[str, Any]:
-        """Request or execute a spending mandate change."""
-        return modify_spending_mandate_handler(
-            new_limit=new_limit,
-            add_merchant=add_merchant,
-            add_category=add_category,
-            confirmation_token=confirmation_token,
-            customer_id=customer_id,
-        )
 
     @server.tool(
         name="inquire_merchant",
@@ -1041,30 +903,4 @@ def register_remote_tools(server: MCPServer) -> None:
         """Inspect the authenticated customer's active spending mandate."""
         return get_spending_mandate_remote_handler()
 
-    @server.tool(
-        name="modify_spending_mandate",
-        description=(
-            "Modify the authenticated customer's spending mandate (spending limit, allowed merchants, or allowed categories) "
-            "directly within the conversation. "
-            "Call this when the user asks to change their limit (e.g. 'increase limit to 5000'), "
-            "authorize a new merchant (e.g. 'add MERCH_NET to allowed merchants'), "
-            "or authorize a new category (e.g. 'add networking to allowed categories'). "
-            "Protocol Guard: If confirmation_token is not provided, this returns a confirmation challenge "
-            "that you MUST present to the human user. Call this tool again with confirmation_token only after "
-            "the user says YES."
-        )
-    )
-    def modify_spending_mandate_remote(
-        new_limit: Optional[float] = None,
-        add_merchant: Optional[str] = None,
-        add_category: Optional[str] = None,
-        confirmation_token: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Request or execute a spending mandate change on behalf of authenticated customer."""
-        return modify_spending_mandate_remote_handler(
-            new_limit=new_limit,
-            add_merchant=add_merchant,
-            add_category=add_category,
-            confirmation_token=confirmation_token,
-        )
 
