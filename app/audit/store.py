@@ -452,13 +452,14 @@ class AuditStore:
             )
             conn.commit()
 
-    def get_daily_spend(
+    def get_daily_spend_paise(
         self,
         customer_id: str,
         target_date: Optional[str] = None,
-    ) -> float:
+    ) -> int:
         """
-        Calculates the total approved spend for a customer on a given UTC date (defaults to today).
+        Calculates the total approved spend in authoritative integer paise for a customer
+        on a given UTC date (defaults to today) without floating-point accumulation drift.
         """
         self._ensure_db_initialized()
         date_prefix = target_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -466,7 +467,7 @@ class AuditStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT SUM(amount) FROM audit_records
+                SELECT SUM(COALESCE(amount_paise, CAST(ROUND(amount * 100) AS INTEGER))) FROM audit_records
                 WHERE customer_id = ?
                   AND (decision = 'APPROVED' OR (decision = 'PENDING_CONFIRMATION' AND payment_status = 'created'))
                   AND timestamp LIKE ?;
@@ -474,7 +475,19 @@ class AuditStore:
                 (customer_id.strip(), f"{date_prefix}%")
             )
             result = cursor.fetchone()
-            return float(result[0]) if result and result[0] is not None else 0.0
+            return int(result[0]) if result and result[0] is not None else 0
+
+    def get_daily_spend(
+        self,
+        customer_id: str,
+        target_date: Optional[str] = None,
+    ) -> float:
+        """
+        Calculates the total approved spend in INR for a customer on a given UTC date.
+        Derived directly from authoritative integer paise to prevent precision loss.
+        """
+        paise = self.get_daily_spend_paise(customer_id, target_date)
+        return round(paise / 100.0, 2)
 
     def verify_integrity(self) -> Dict[str, Any]:
         """

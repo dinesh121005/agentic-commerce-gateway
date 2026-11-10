@@ -94,17 +94,25 @@ class WalletStore:
                     pass
 
     def get_balance(self, customer_id: str) -> float:
-        """Return the current auto-pay balance for a customer."""
+        """Return the current auto-pay balance for a customer in INR."""
+        paise = self.get_balance_paise(customer_id)
+        return round(paise / 100.0, 2)
+
+    def get_balance_paise(self, customer_id: str) -> int:
+        """Return the authoritative auto-pay balance for a customer in integer paise."""
         self._ensure_db_initialized()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT balance FROM customer_wallets WHERE customer_id = ?",
+                "SELECT balance, balance_paise FROM customer_wallets WHERE customer_id = ?",
                 (customer_id,),
             )
             row = cursor.fetchone()
             if row:
-                return float(row[0])
+                if len(row) > 1 and row[1] is not None:
+                    return int(row[1])
+                from decimal import Decimal, ROUND_HALF_UP
+                return int((Decimal(str(row[0])) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
             # If not yet seeded, provision default balance scaled to customer mandate limit
             now = time.time()
             try:
@@ -116,8 +124,8 @@ class WalletStore:
 
             cursor.execute("SELECT * FROM customer_wallets LIMIT 0;")
             cols = [desc[0].lower() for desc in (cursor.description or [])]
+            default_balance_paise = int(round(default_balance * 100))
             if "balance_paise" in cols:
-                default_balance_paise = int(round(default_balance * 100))
                 cursor.execute(
                     """
                     INSERT INTO customer_wallets (customer_id, balance, balance_paise, currency, created_at, updated_at)
@@ -134,12 +142,12 @@ class WalletStore:
                     (customer_id, default_balance, now, now),
                 )
             conn.commit()
-            return default_balance
+            return default_balance_paise
 
     def debit(self, customer_id: str, amount: float) -> Tuple[bool, float, str]:
         """
-        Atomically debits customer auto-pay balance using atomic conditional SQL update
-        to eliminate check-then-act double-spending race conditions (ADR-02 §4.1).
+        Atomically debits customer auto-pay balance using authoritative integer-paise conditional update
+        to eliminate check-then-act double-spending and float precision drift (ADR-02 §4.1).
         Dual-updates both balance (float) and balance_paise (integer).
         Returns (success: bool, remaining_balance: float, message: str).
         """
@@ -149,20 +157,20 @@ class WalletStore:
         now = time.time()
 
         # Ensure wallet exists before atomic update
-        self.get_balance(customer_id)
+        self.get_balance_paise(customer_id)
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE customer_wallets
-                SET balance = balance - ?,
+                SET balance = round((COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) - ?) / 100.0, 2),
                     balance_paise = COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) - ?,
                     updated_at = ?
                 WHERE customer_id = ?
-                  AND (balance_paise >= ? OR balance >= ?);
+                  AND COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) >= ?;
                 """,
-                (amount, amount_paise, now, customer_id, amount_paise, amount),
+                (amount_paise, amount_paise, now, customer_id, amount_paise),
             )
             if cursor.rowcount == 0:
                 cursor.execute("SELECT balance FROM customer_wallets WHERE customer_id = ?;", (customer_id,))
@@ -176,7 +184,7 @@ class WalletStore:
             return True, remaining_bal, f"Auto-debited ₹{amount:.2f} (Remaining balance: ₹{remaining_bal:.2f})"
 
     def credit(self, customer_id: str, amount: float) -> float:
-        """Atomically credit customer auto-pay balance."""
+        """Atomically credit customer auto-pay balance with authoritative integer-paise synchronization."""
         self._ensure_db_initialized()
         from decimal import Decimal, ROUND_HALF_UP
         amount_paise = int((Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -186,12 +194,12 @@ class WalletStore:
             cursor.execute(
                 """
                 UPDATE customer_wallets
-                SET balance = balance + ?,
+                SET balance = round((COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) + ?) / 100.0, 2),
                     balance_paise = COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) + ?,
                     updated_at = ?
                 WHERE customer_id = ?;
                 """,
-                (amount, amount_paise, now, customer_id),
+                (amount_paise, amount_paise, now, customer_id),
             )
             conn.commit()
             cursor.execute("SELECT balance FROM customer_wallets WHERE customer_id = ?;", (customer_id,))

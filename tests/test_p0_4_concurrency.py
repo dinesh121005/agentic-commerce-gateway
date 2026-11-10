@@ -196,3 +196,68 @@ def test_concurrent_confirmation_replay_idempotency():
     bal = wallet_store.get_balance("CUST001")
     assert abs(bal - (10000.0 - 1499.0)) < 0.01
 
+
+def test_wallet_debit_authoritative_integer_paise_boundary():
+    """Verify that wallet debit evaluates strictly on integer paise without float threshold leakage."""
+    wallet_store.set_balance("CUST_BOUNDARY", 100.00)
+    assert wallet_store.get_balance_paise("CUST_BOUNDARY") == 10000
+
+    # 1. Attempt to debit ₹100.01 (10,001 paise) -> MUST fail
+    success, rem, msg = wallet_store.debit("CUST_BOUNDARY", 100.01)
+    assert success is False
+    assert rem == 100.0
+    assert wallet_store.get_balance_paise("CUST_BOUNDARY") == 10000
+
+    # 2. Attempt to debit ₹100.00 (10,000 paise) -> MUST succeed
+    success, rem, msg = wallet_store.debit("CUST_BOUNDARY", 100.00)
+    assert success is True
+    assert rem == 0.0
+    assert wallet_store.get_balance_paise("CUST_BOUNDARY") == 0
+
+
+def test_audit_daily_spend_paise_exact_aggregation():
+    """Verify that get_daily_spend_paise sums integer paise without binary float accumulation drift."""
+    from uuid import uuid4
+    from app.audit import audit_store
+
+    cust_id = f"CUST_ACC_{uuid4().hex[:6]}"
+    # Record 3 transactions with fractional amounts
+    audit_store.write_proposal(
+        transaction_id=str(uuid4()),
+        customer_id=cust_id,
+        product_id="KB001",
+        merchant_id="MERCH_ELEC",
+        quantity=1,
+        amount=33.33,
+        decision="APPROVED",
+        decision_reason="Approved",
+        amount_paise=3333,
+    )
+    audit_store.write_proposal(
+        transaction_id=str(uuid4()),
+        customer_id=cust_id,
+        product_id="KB001",
+        merchant_id="MERCH_ELEC",
+        quantity=1,
+        amount=33.33,
+        decision="APPROVED",
+        decision_reason="Approved",
+        amount_paise=3333,
+    )
+    audit_store.write_proposal(
+        transaction_id=str(uuid4()),
+        customer_id=cust_id,
+        product_id="KB001",
+        merchant_id="MERCH_ELEC",
+        quantity=1,
+        amount=33.34,
+        decision="APPROVED",
+        decision_reason="Approved",
+        amount_paise=3334,
+    )
+
+    paise_total = audit_store.get_daily_spend_paise(cust_id)
+    assert paise_total == 10000  # 3333 + 3333 + 3334 = 10,000 paise exactly
+    inr_total = audit_store.get_daily_spend(cust_id)
+    assert inr_total == 100.0
+
