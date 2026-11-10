@@ -392,6 +392,59 @@ class AuditStore:
             )
             conn.commit()
 
+    def claim_inventory_compensation(
+        self,
+        transaction_id: str,
+        razorpay_order_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Atomically claims inventory compensation for a failed/cancelled payment (P0-E/P0-G).
+        Ensures stock is restored exactly once, only if previously reserved.
+        Transitions payment_status to 'failed' and appends PAYMENT_FAILED to tamper-evident audit ledger.
+        Returns True if this thread successfully claimed the compensation.
+        Returns False if already compensated, captured, or not in a compensable state.
+        """
+        self._ensure_db_initialized()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Atomically update payment_status to 'failed' ONLY IF decision='APPROVED' and payment_status IN ('created', 'PENDING')
+            cursor.execute(
+                """
+                UPDATE audit_records
+                SET payment_status = 'failed'
+                WHERE transaction_id = ?
+                  AND decision = 'APPROVED'
+                  AND payment_status IN ('created', 'PENDING');
+                """,
+                (transaction_id,),
+            )
+            if cursor.rowcount == 0:
+                conn.commit()
+                return False
+
+            # We successfully claimed the compensation! Now append the audit event to keep hash chain intact
+            payload = {
+                "payment_status": "failed",
+                "razorpay_order_id": razorpay_order_id,
+                "reason": "inventory_compensation_claimed",
+            }
+            new_rec_hash, _ = self._append_event(
+                cursor,
+                transaction_id=transaction_id,
+                event_type="PAYMENT_FAILED",
+                payload_dict=payload,
+            )
+            cursor.execute(
+                """
+                UPDATE audit_records
+                SET record_hash = ?, razorpay_order_id = COALESCE(?, razorpay_order_id)
+                WHERE transaction_id = ?;
+                """,
+                (new_rec_hash, razorpay_order_id, transaction_id),
+            )
+            conn.commit()
+            return True
+
     def update_payment_outcome(
         self,
         transaction_id: str,

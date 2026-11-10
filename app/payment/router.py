@@ -314,9 +314,6 @@ async def razorpay_webhook(
             "deduplicated": True,
         }
 
-    # Persist in DB and memory
-    audit_store.record_webhook_event(event_id)
-    _processed_webhook_event_ids.add(event_id)
     logger.info("Received and processing Razorpay webhook event: %s (id: %s) for order: %s, tx: %s", event, event_id, order_id, transaction_id)
 
     # 4. State Transitions and Inventory Compensation
@@ -342,17 +339,24 @@ async def razorpay_webhook(
                         )
                         conn.commit()
             elif event in ("payment.failed", "payment_link.cancelled", "payment_link.expired"):
-                # Automated inventory compensation: restore decremented stock
-                restore_stock(record.product_id, record.quantity)
-                logger.info("Restored %s units of %s after %s event", record.quantity, record.product_id, event)
-
-                audit_store.update_payment_outcome(
-                    transaction_id=transaction_id,
-                    payment_status="failed",
-                    razorpay_order_id=order_id,
-                )
+                # Automated inventory compensation: restore decremented stock exactly once (P0-E/P0-G)
+                if audit_store.claim_inventory_compensation(transaction_id, razorpay_order_id=order_id):
+                    restore_stock(record.product_id, record.quantity)
+                    logger.info("Restored %s units of %s after %s event", record.quantity, record.product_id, event)
+                else:
+                    logger.info("Skipped inventory compensation for %s: not in compensable state or already compensated", transaction_id)
+                    if record.decision != "APPROVED" and record.payment_status not in ("captured", "failed"):
+                        audit_store.update_payment_outcome(
+                            transaction_id=transaction_id,
+                            payment_status="failed",
+                            razorpay_order_id=order_id,
+                        )
         else:
             logger.warning("Webhook received for unknown or untracked transaction: %s", transaction_id)
+
+    # 5. Persist deduplication record ONLY AFTER business effects succeed (Durable Idempotency Guard)
+    audit_store.record_webhook_event(event_id)
+    _processed_webhook_event_ids.add(event_id)
 
     return {
         "status": "ok",

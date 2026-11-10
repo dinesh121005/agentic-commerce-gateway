@@ -700,4 +700,213 @@ def test_payment_link_paid_webhook_updates_ledger():
     assert record.decision == "APPROVED"
 
 
+def test_webhook_payment_failed_duplicate_restores_stock_exactly_once():
+    """
+    P0-E/P0-G: Verifies that multiple distinct failure webhooks (e.g. payment.failed followed by
+    payment_link.cancelled or concurrent delivery) restore reserved inventory exactly once.
+    """
+    import hmac
+    import hashlib
+    import json
+    from app.catalog.service import get_product, decrement_stock
+    from app.audit import audit_store
+    from app.payment.router import get_webhook_secret
+
+    secret = get_webhook_secret()
+    prod = get_product("HK001")
+    initial_stock = prod.stock
+
+    txn_id = "txn-fail-dedup-p0e-001"
+    audit_store.write_proposal(
+        transaction_id=txn_id,
+        customer_id="CUST001",
+        product_id="HK001",
+        merchant_id="MERCH_ELEC",
+        quantity=3,
+        amount=1497.0,
+        decision="APPROVED",
+        decision_reason="Pre-seed for exactly-once compensation test",
+    )
+    # Simulate inventory reservation
+    assert decrement_stock("HK001", 3) is True
+    assert get_product("HK001").stock == initial_stock - 3
+
+    # Webhook 1: payment.failed with event_id evt_fail_first
+    payload_1 = {
+        "event_id": "evt_fail_first_001",
+        "event": "payment.failed",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_FailFirst001",
+                    "order_id": "order_Fail001",
+                    "amount": 149700,
+                    "status": "failed",
+                    "notes": {"transaction_id": txn_id},
+                }
+            }
+        }
+    }
+    body_1 = json.dumps(payload_1).encode("utf-8")
+    sig_1 = hmac.new(secret.encode("utf-8"), body_1, hashlib.sha256).hexdigest()
+
+    resp_1 = client.post(
+        "/payment/webhook",
+        content=body_1,
+        headers={"X-Razorpay-Signature": sig_1, "Content-Type": "application/json", "X-Razorpay-Event-Id": "evt_fail_first_001"},
+    )
+    assert resp_1.status_code == 200
+    assert get_product("HK001").stock == initial_stock
+
+    # Webhook 2: payment_link.cancelled with different event_id evt_cancel_second
+    payload_2 = {
+        "event_id": "evt_cancel_second_002",
+        "event": "payment_link.cancelled",
+        "payload": {
+            "payment_link": {
+                "entity": {
+                    "id": "plink_Cancel002",
+                    "order_id": "order_Fail001",
+                    "status": "cancelled",
+                    "notes": {"transaction_id": txn_id},
+                }
+            }
+        }
+    }
+    body_2 = json.dumps(payload_2).encode("utf-8")
+    sig_2 = hmac.new(secret.encode("utf-8"), body_2, hashlib.sha256).hexdigest()
+
+    resp_2 = client.post(
+        "/payment/webhook",
+        content=body_2,
+        headers={"X-Razorpay-Signature": sig_2, "Content-Type": "application/json", "X-Razorpay-Event-Id": "evt_cancel_second_002"},
+    )
+    assert resp_2.status_code == 200
+
+    # CRITICAL: Stock MUST NOT be incremented a second time (phantom stock prevention)
+    assert get_product("HK001").stock == initial_stock
+
+
+def test_webhook_payment_failed_on_rejected_transaction_does_not_inflate_stock():
+    """
+    P0-E/P0-G: Verifies that failure webhooks on transactions that were REJECTED (where stock
+    was never reserved/decremented) do not restore or inflate inventory.
+    """
+    import hmac
+    import hashlib
+    import json
+    from app.catalog.service import get_product
+    from app.audit import audit_store
+    from app.payment.router import get_webhook_secret
+
+    secret = get_webhook_secret()
+    prod = get_product("HK001")
+    initial_stock = prod.stock
+
+    txn_id = "txn-fail-rejected-p0e-002"
+    audit_store.write_proposal(
+        transaction_id=txn_id,
+        customer_id="CUST001",
+        product_id="HK001",
+        merchant_id="MERCH_ELEC",
+        quantity=5,
+        amount=2495.0,
+        decision="REJECTED",
+        decision_reason="Exceeded limit, stock was never decremented",
+    )
+    # Confirm initial stock is unchanged
+    assert get_product("HK001").stock == initial_stock
+
+    payload = {
+        "event_id": "evt_fail_rejected_003",
+        "event": "payment.failed",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_FailRej003",
+                    "order_id": "order_Rej003",
+                    "amount": 249500,
+                    "status": "failed",
+                    "notes": {"transaction_id": txn_id},
+                }
+            }
+        }
+    }
+    body = json.dumps(payload).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+    resp = client.post(
+        "/payment/webhook",
+        content=body,
+        headers={"X-Razorpay-Signature": sig, "Content-Type": "application/json", "X-Razorpay-Event-Id": "evt_fail_rejected_003"},
+    )
+    assert resp.status_code == 200
+
+    # Stock MUST NOT be inflated
+    assert get_product("HK001").stock == initial_stock
+    # Transaction payment_status marked failed
+    record = audit_store.get(txn_id)
+    assert record.payment_status == "failed"
+
+
+def test_webhook_unprocessed_if_handler_raises_error():
+    """
+    P0-E: Verifies that if webhook handler processing fails before completion,
+    the event is NOT marked as processed, preserving retryability.
+    """
+    import hmac
+    import hashlib
+    import json
+    from unittest.mock import patch
+    from app.audit import audit_store
+    from app.payment.router import get_webhook_secret
+
+    secret = get_webhook_secret()
+    event_id = "evt_crash_retry_004"
+    txn_id = "txn-crash-retry-004"
+
+    audit_store.write_proposal(
+        transaction_id=txn_id,
+        customer_id="CUST001",
+        product_id="HK001",
+        merchant_id="MERCH_ELEC",
+        quantity=1,
+        amount=499.0,
+        decision="APPROVED",
+        decision_reason="Pre-seed for crash test",
+    )
+
+    payload = {
+        "event_id": event_id,
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_Crash004",
+                    "order_id": "order_Crash004",
+                    "amount": 49900,
+                    "status": "captured",
+                    "notes": {"transaction_id": txn_id},
+                }
+            }
+        }
+    }
+    body = json.dumps(payload).encode("utf-8")
+    sig = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+    with patch.object(audit_store, "update_payment_outcome", side_effect=RuntimeError("Simulated DB Crash")):
+        try:
+            client.post(
+                "/payment/webhook",
+                content=body,
+                headers={"X-Razorpay-Signature": sig, "Content-Type": "application/json", "X-Razorpay-Event-Id": event_id},
+            )
+        except RuntimeError:
+            pass
+
+    # Verify event_id is NOT marked as processed in DB
+    assert audit_store.is_webhook_processed(event_id) is False
+
+
+
 
