@@ -59,7 +59,7 @@ def verify_admin_key(request: Request) -> str:
         if auth_header.startswith("Bearer "):
             provided_key = auth_header[len("Bearer "):].strip()
 
-    if not provided_key or provided_key != expected_key:
+    if not provided_key or not secrets.compare_digest(provided_key, expected_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Missing or invalid Admin API key",
@@ -80,16 +80,16 @@ def verify_agent_or_admin_auth(request: Request) -> dict:
     """
     expected_admin_key = get_admin_api_key()
 
-    # 1. Check X-Admin-API-Key
+    # 1. Check X-Admin-API-Key with constant-time comparison
     x_admin_key = request.headers.get("x-admin-api-key")
-    if x_admin_key and x_admin_key.strip() == expected_admin_key:
+    if x_admin_key and secrets.compare_digest(x_admin_key.strip(), expected_admin_key):
         return {"auth_type": "admin", "customer_id": None}
 
-    # 2. Check Authorization Header
+    # 2. Check Authorization Header with constant-time comparison
     auth_header = request.headers.get("authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header[len("Bearer "):].strip()
-        if token == expected_admin_key:
+        if secrets.compare_digest(token, expected_admin_key):
             return {"auth_type": "admin", "customer_id": None}
 
         # Attempt to decode as OAuth JWT Access Token
@@ -118,5 +118,41 @@ def verify_agent_or_admin_auth(request: Request) -> dict:
         detail="Unauthorized: Valid OAuth Bearer token or Admin API Key required",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def verify_customer_oauth_token(request: Request) -> str:
+    """
+    FastAPI dependency strictly requiring customer authentication via OAuth 2.1 Bearer JWT.
+    Extracts the authenticated customer_id from the 'sub' claim (ADR-01 §7.1 Identity Grounding).
+    Rejects administrative API keys, as non-custodial signing is sovereign to the customer.
+    """
+    auth_header = request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Missing OAuth Bearer token in Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = auth_header[len("Bearer "):].strip()
+    try:
+        from app.oauth.crypto import verify_access_token
+        payload = verify_access_token(token)
+        customer_id = payload.get("sub")
+        if not customer_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unauthorized: Access token missing 'sub' claim",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return customer_id
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Unauthorized: Invalid or expired OAuth access token ({str(exc)})",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 

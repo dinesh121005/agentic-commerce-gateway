@@ -11,10 +11,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+from app.auth import verify_admin_key
 
 from app.admin.router import router as admin_router
 from app.agent.router import router as agent_router
@@ -24,6 +26,7 @@ from app.mcp.server import mount_remote_mcp, remote_mcp_lifespan
 from app.merchant_agent import merchant_agent_router
 from app.oauth.router import router as oauth_router
 from app.payment.router import router as payment_router
+from app.signing import signing_router
 
 app = FastAPI(
     title="Agentic Commerce Gateway",
@@ -89,6 +92,7 @@ app.include_router(admin_router)
 app.include_router(oauth_router)
 app.include_router(merchant_agent_router)
 app.include_router(payment_router)
+app.include_router(signing_router)
 
 # Mount remote Streamable HTTP MCP server at /mcp
 mount_remote_mcp(app, path="/mcp")
@@ -156,15 +160,21 @@ def get_recommendation_analytics_endpoint() -> dict:
     return audit_store.get_recommendation_analytics()
 
 
-@app.get("/debug-search", tags=["system"], summary="Production Search Diagnostic Endpoint")
+@app.get(
+    "/debug-search",
+    tags=["system"],
+    summary="Production Search Diagnostic Endpoint",
+    dependencies=[Depends(verify_admin_key)],
+)
 def debug_search_endpoint(query: str = "keyboard") -> dict:
     """
     Diagnostic endpoint to inspect database connection target, catalog table row count,
-    product statuses, and search_products execution traceback on Render.
+    product statuses, and search_products execution traceback.
+    Guarded strictly by Admin API Key authentication (VULN-08 remediation).
     """
     import traceback
     from app.db import get_db_connection
-    from app.catalog.service import search_products
+    from app.catalog.service import search_products, _ensure_catalog_db_initialized
 
     raw_url = os.environ.get("DATABASE_URL", "gateway.db")
     db_type = "postgresql" if ("postgres://" in raw_url or "postgresql://" in raw_url) else "sqlite"
@@ -181,6 +191,7 @@ def debug_search_endpoint(query: str = "keyboard") -> dict:
     }
 
     try:
+        _ensure_catalog_db_initialized()
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM catalog_products;")
@@ -209,7 +220,8 @@ def debug_search_endpoint(query: str = "keyboard") -> dict:
 
     except Exception as e:
         result["error"] = str(e)
-        result["traceback"] = traceback.format_exc()
+        is_prod = os.environ.get("ENVIRONMENT", "development").lower() == "production"
+        result["traceback"] = None if is_prod else traceback.format_exc()
 
     return result
 

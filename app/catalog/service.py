@@ -35,6 +35,7 @@ def _ensure_catalog_db_initialized() -> None:
                 category TEXT NOT NULL,
                 merchant_id TEXT NOT NULL,
                 price REAL NOT NULL,
+                price_paise INTEGER,
                 stock INTEGER NOT NULL,
                 description TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -116,19 +117,39 @@ def _ensure_catalog_db_initialized() -> None:
             except Exception:
                 pass
 
+        if "price_paise" not in existing_cols:
+            try:
+                cursor.execute("ALTER TABLE catalog_products ADD COLUMN price_paise INTEGER;")
+                conn.commit()
+            except Exception:
+                pass
+
         # Always ensure all catalog products from seed data exist (ON CONFLICT DO NOTHING preserves edited products)
+        from decimal import Decimal, ROUND_HALF_UP
         for p in PRODUCTS:
             p_status = "ACTIVE" if p.stock > 0 else "OUT_OF_STOCK"
+            p_paise = int((Decimal(str(p.price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
             cursor.execute(
                 """
                 INSERT INTO catalog_products (
-                    id, name, category, merchant_id, price, stock, description, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, name, category, merchant_id, price, price_paise, stock, description, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO NOTHING;
                 """,
-                (p.id, p.name, p.category, p.merchant_id, p.price, p.stock, p.description, p_status, now_ts, now_ts),
+                (p.id, p.name, p.category, p.merchant_id, p.price, p_paise, p.stock, p.description, p_status, now_ts, now_ts),
             )
         conn.commit()
+
+        # Backfill any remaining null price_paise (e.g. from existing unpopulated rows)
+        try:
+            cursor.execute("SELECT id, price FROM catalog_products WHERE price_paise IS NULL;")
+            rows = cursor.fetchall()
+            for r_id, r_price in rows:
+                p_paise = int((Decimal(str(r_price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                cursor.execute("UPDATE catalog_products SET price_paise = ? WHERE id = ?;", (p_paise, r_id))
+            conn.commit()
+        except Exception:
+            pass
 
         # Seed default affinity graph into product_relationships if empty
         cursor.execute("SELECT COUNT(*) FROM product_relationships;")
@@ -386,11 +407,12 @@ def create_product(req: CreateProductRequest) -> Product:
         if cursor.fetchone() is not None:
             raise ValueError(f"Product ID '{clean_id}' already exists in catalog.")
 
+        p_paise = int((Decimal(str(req.price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         cursor.execute(
             """
             INSERT INTO catalog_products (
-                id, name, category, merchant_id, price, stock, description, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                id, name, category, merchant_id, price, price_paise, stock, description, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 clean_id,
@@ -398,6 +420,7 @@ def create_product(req: CreateProductRequest) -> Product:
                 req.category.strip().lower(),
                 req.merchant_id.strip(),
                 float(req.price),
+                p_paise,
                 int(req.stock),
                 req.description.strip(),
                 p_status,
@@ -427,15 +450,16 @@ def update_product(product_id: str, req: UpdateProductRequest) -> Product:
         status = "OUT_OF_STOCK"
 
     now = time.time()
+    p_paise = int((Decimal(str(price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE catalog_products
-            SET name = ?, category = ?, price = ?, stock = ?, description = ?, status = ?, updated_at = ?
+            SET name = ?, category = ?, price = ?, price_paise = ?, stock = ?, description = ?, status = ?, updated_at = ?
             WHERE id = ?;
             """,
-            (name, category, price, stock, description, status, now, clean_id),
+            (name, category, price, p_paise, stock, description, status, now, clean_id),
         )
         conn.commit()
 

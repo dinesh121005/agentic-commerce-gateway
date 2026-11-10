@@ -147,6 +147,27 @@ class MandateStore:
                     )
             conn.commit()
 
+            # Safe migration: ensure paise columns exist (P0.1D Additive Migration)
+            cursor.execute("SELECT * FROM customer_mandates LIMIT 0;")
+            existing_cols = [desc[0].lower() for desc in (cursor.description or [])]
+            if "max_transaction_amount_paise" not in existing_cols:
+                try:
+                    cursor.execute("ALTER TABLE customer_mandates ADD COLUMN max_transaction_amount_paise INTEGER;")
+                    cursor.execute("ALTER TABLE customer_mandates ADD COLUMN daily_limit_paise INTEGER;")
+                    conn.commit()
+                except Exception:
+                    pass
+                try:
+                    from decimal import Decimal, ROUND_HALF_UP
+                    cursor.execute("SELECT customer_id, max_transaction_amount, daily_limit FROM customer_mandates WHERE max_transaction_amount_paise IS NULL;")
+                    for cid, max_amt, d_limit in cursor.fetchall():
+                        m_paise = int((Decimal(str(max_amt)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                        d_paise = int((Decimal(str(d_limit or 5000.0)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                        cursor.execute("UPDATE customer_mandates SET max_transaction_amount_paise = ?, daily_limit_paise = ? WHERE customer_id = ?;", (m_paise, d_paise, cid))
+                    conn.commit()
+                except Exception:
+                    pass
+
     def _row_to_mandate(self, row: tuple) -> Mandate:
         """Convert a database row into a Pydantic Mandate instance."""
         if len(row) == 12:

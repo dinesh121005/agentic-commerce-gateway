@@ -74,6 +74,25 @@ class WalletStore:
                 )
             conn.commit()
 
+            # Safe migration: ensure balance_paise exists (P0.1D Additive Migration)
+            cursor.execute("SELECT * FROM customer_wallets LIMIT 0;")
+            existing_cols = [desc[0].lower() for desc in (cursor.description or [])]
+            if "balance_paise" not in existing_cols:
+                try:
+                    cursor.execute("ALTER TABLE customer_wallets ADD COLUMN balance_paise INTEGER;")
+                    conn.commit()
+                except Exception:
+                    pass
+                try:
+                    from decimal import Decimal, ROUND_HALF_UP
+                    cursor.execute("SELECT customer_id, balance FROM customer_wallets WHERE balance_paise IS NULL;")
+                    for cid, bal in cursor.fetchall():
+                        b_paise = int((Decimal(str(bal)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                        cursor.execute("UPDATE customer_wallets SET balance_paise = ? WHERE customer_id = ?;", (b_paise, cid))
+                    conn.commit()
+                except Exception:
+                    pass
+
     def get_balance(self, customer_id: str) -> float:
         """Return the current auto-pay balance for a customer."""
         self._ensure_db_initialized()

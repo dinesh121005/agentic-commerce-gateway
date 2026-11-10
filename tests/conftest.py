@@ -16,6 +16,7 @@ from app.catalog import service as catalog_service
 from app.audit import audit_store
 from app.oauth.store import customer_auth_store
 from app.policy.store import DEMO_MANDATES, mandate_store
+from app.signing.store import signing_store
 from app.wallet.store import wallet_store
 
 
@@ -34,11 +35,13 @@ def isolate_test_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(audit_store, "db_path", test_db)
     monkeypatch.setattr(customer_auth_store, "db_path", test_db)
     monkeypatch.setattr(mandate_store, "db_path", test_db)
+    monkeypatch.setattr(signing_store, "db_path", test_db)
     monkeypatch.setattr(wallet_store, "db_path", test_db)
     monkeypatch.setattr(catalog_service, "_catalog_initialized", False)
     audit_store._init_db()
     customer_auth_store._init_db()
     mandate_store._init_db()
+    signing_store._init_db()
     wallet_store._init_db()
 
     yield test_db

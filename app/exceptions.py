@@ -41,3 +41,16 @@ class InsufficientStockError(GatewayError):
 class InvalidPurchaseError(GatewayError):
     """Raised when purchase parameters fail domain validation (e.g. quantity < 1)."""
     pass
+
+
+class StalePriceError(GatewayError):
+    """Raised when a product's live catalog price differs from the proposed/confirmed price."""
+    def __init__(self, product_id: str, proposed_amount: float, live_amount: float):
+        super().__init__(
+            f"Catalog price has changed since purchase proposal for product '{product_id}' "
+            f"(proposed total: ₹{proposed_amount:.2f}, live total: ₹{live_amount:.2f}). "
+            f"A new purchase proposal must be requested and authorized."
+        )
+        self.product_id = product_id
+        self.proposed_amount = proposed_amount
+        self.live_amount = live_amount

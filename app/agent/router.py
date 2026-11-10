@@ -20,6 +20,7 @@ from app.exceptions import (
     InvalidPurchaseError,
     MandateNotFoundError,
     ProductNotFoundError,
+    StalePriceError,
 )
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -95,6 +96,17 @@ def confirm_purchase_endpoint(
         return confirm_purchase(
             confirmation_token=payload.confirmation_token,
             customer_id=caller_customer_id,
+        )
+    except StalePriceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "STALE_PRICE_DETECTED",
+                "message": str(e),
+                "product_id": e.product_id,
+                "proposed_amount": e.proposed_amount,
+                "live_amount": e.live_amount,
+            }
         )
     except InsufficientStockError as e:
         raise HTTPException(

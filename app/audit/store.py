@@ -134,6 +134,22 @@ class AuditStore:
                 except Exception:
                     conn.rollback()
 
+            if "amount_paise" not in existing_cols:
+                try:
+                    cursor.execute("ALTER TABLE audit_records ADD COLUMN amount_paise INTEGER;")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                try:
+                    from decimal import Decimal, ROUND_HALF_UP
+                    cursor.execute("SELECT transaction_id, amount FROM audit_records WHERE amount_paise IS NULL;")
+                    for tx_id, amt in cursor.fetchall():
+                        a_paise = int((Decimal(str(amt)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+                        cursor.execute("UPDATE audit_records SET amount_paise = ? WHERE transaction_id = ?;", (a_paise, tx_id))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
             # Append-only cryptographic ledger
             cursor.execute(
                 """
@@ -241,6 +257,24 @@ class AuditStore:
             (event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash)
         )
         return event_hash, prev_hash
+
+    def append_event(
+        self,
+        transaction_id: str,
+        event_type: str,
+        payload_dict: dict,
+        timestamp: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        """
+        Public method to append a standalone tamper-evident audit event block to the cryptographic ledger.
+        Used for key lifecycle events, mandate registration/revocation, and approval events.
+        """
+        self._ensure_db_initialized()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            res = self._append_event(cursor, transaction_id, event_type, payload_dict, timestamp)
+            conn.commit()
+            return res
 
     def write_proposal(
         self,

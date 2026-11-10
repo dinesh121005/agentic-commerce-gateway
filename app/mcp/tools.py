@@ -36,7 +36,7 @@ from app.agent.service import (
 )
 from app.audit import audit_store
 from app.catalog.service import get_product, search_products
-from app.exceptions import GatewayError
+from app.exceptions import GatewayError, StalePriceError
 from app.merchant_agent.models import InquiryRequest
 from app.merchant_agent.service import merchant_agent_service
 from app.policy.store import mandate_store
@@ -294,6 +294,21 @@ def confirm_purchase_handler(
             customer_id=customer_id or "CUST001",
         )
         return to_customer_response(response)
+    except StalePriceError as e:
+        logger.warning("Stale price detected during confirmation: %s", e)
+        return {
+            "decision": "REJECTED",
+            "status": "STALE_PRICE_DETECTED",
+            "product_name": e.product_id,
+            "product_id": e.product_id,
+            "proposed_amount": e.proposed_amount,
+            "live_amount": e.live_amount,
+            "amount": e.proposed_amount,
+            "reason": str(e),
+            "reference_code": "STALE_PRICE",
+            "requires_confirmation": False,
+            "confirmation_token": None,
+        }
     except GatewayError as e:
         return {
             "decision": "REJECTED",

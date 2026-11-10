@@ -22,6 +22,7 @@ from app.exceptions import (
     InvalidPurchaseError,
     MandateNotFoundError,
     ProductNotFoundError,
+    StalePriceError,
 )
 import os
 import urllib.parse
@@ -37,6 +38,7 @@ from app.wallet.store import wallet_store
 # Orders >= ₹500 require human confirmation token for safety and gating.
 AUTO_CONFIRM_THRESHOLD = 500.0
 CONFIRMATION_TOKEN_TTL_SECONDS = 300  # 5 minutes
+CONFIRMATION_TOKEN_SECRET = os.environ.get("CONFIRMATION_TOKEN_SECRET", JWT_SECRET)
 
 
 def generate_bucketed_idempotency_key(
@@ -62,9 +64,12 @@ def generate_confirmation_token(
     amount: float,
     transaction_id: str,
     idempotency_key: str,
+    merchant_id: Optional[str] = None,
 ) -> str:
     """
     Generates a cryptographically signed, short-lived JWT confirmation token.
+    Binds customer, SKU, quantity, authoritative amount, currency, and merchant.
+    Uses dedicated CONFIRMATION_TOKEN_SECRET for token-purpose separation (VULN-06).
     """
     now = datetime.now(timezone.utc)
     expiry = now + timedelta(seconds=CONFIRMATION_TOKEN_TTL_SECONDS)
@@ -73,26 +78,31 @@ def generate_confirmation_token(
         "product_id": product_id,
         "quantity": quantity,
         "amount": amount,
+        "currency": "INR",
+        "merchant_id": merchant_id,
         "transaction_id": transaction_id,
         "idempotency_key": idempotency_key,
         "type": "purchase_confirmation",
+        "purpose": "purchase_confirmation",
         "iat": int(now.timestamp()),
         "exp": int(expiry.timestamp()),
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    return jwt.encode(payload, CONFIRMATION_TOKEN_SECRET, algorithm="HS256")
 
 
 def decode_confirmation_token(token: str) -> dict:
     """
     Decodes and validates a signed purchase confirmation token.
+    Enforces dedicated secret and token-purpose validation.
     Raises jwt.PyJWTError on expiration or signature tampering.
     """
     payload = jwt.decode(
         token,
-        JWT_SECRET,
+        CONFIRMATION_TOKEN_SECRET,
         algorithms=["HS256"],
     )
-    if payload.get("type") != "purchase_confirmation":
+    token_type = payload.get("type") or payload.get("purpose")
+    if token_type != "purchase_confirmation":
         raise InvalidPurchaseError("Invalid token type: not a purchase confirmation token")
     return payload
 
@@ -310,6 +320,7 @@ def execute_purchase(
             amount=amount,
             transaction_id=transaction_id,
             idempotency_key=idempotency_key,
+            merchant_id=product.merchant_id,
         )
 
     # 12. Phase A Audit: Record the evaluated proposal and rule decision
@@ -464,13 +475,21 @@ def confirm_purchase(
     ):
         return _build_replayed_response(existing_record)
 
-    # 2. Re-verify stock
+    # 2. Re-verify stock & Live Catalog Pricing Parity (P0.1: STALE_PRICE_DETECTED)
     product = get_product(product_id)
     if product.stock < quantity:
         raise InsufficientStockError(
             product_id=product.id,
             requested=quantity,
             available=product.stock,
+        )
+
+    expected_amount = round(product.price * quantity, 2)
+    if abs(expected_amount - amount) > 0.001:
+        raise StalePriceError(
+            product_id=product.id,
+            proposed_amount=amount,
+            live_amount=expected_amount,
         )
 
     # 3. Mandate Lookup & Deterministic Policy Re-Evaluation at Confirmation Time
