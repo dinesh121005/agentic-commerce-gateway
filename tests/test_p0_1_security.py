@@ -259,3 +259,64 @@ def test_additive_paise_columns_present_and_backfilled():
             expected_m = int((Decimal(str(m_float)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
             assert m_paise == expected_m
 
+
+def test_product_model_exposes_authoritative_price_paise():
+    """Verify that Product entities returned by catalog queries include price_paise."""
+    product = get_product("KB001")
+    assert product.price_paise is not None
+    assert isinstance(product.price_paise, int)
+    assert product.price_paise == 149900  # ₹1,499.00 = 149,900 paise
+
+
+def test_purchase_proposal_carries_exact_integer_paise():
+    """Verify that execute_purchase stores authoritative amount_paise in the audit record."""
+    proposal = execute_purchase(
+        customer_id="CUST001",
+        product_id="KB001",
+        quantity=2,
+    )
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT amount, amount_paise FROM audit_records WHERE transaction_id = ?;", (proposal.transaction_id,))
+        row = cursor.fetchone()
+        assert row is not None
+        amount_flt, amount_paise = row
+        assert amount_paise == 299800  # ₹2,998.00 = 299,800 paise
+        assert abs(amount_flt - 2998.0) < 0.01
+
+
+def test_stale_price_exact_one_paise_difference_aborts_confirmation(admin_headers):
+    """Verify that even a 1-paisa difference between live catalog and token aborts confirmation with HTTP 409."""
+    product = get_product("KB001")
+    orig_paise = product.price_paise
+    orig_price = product.price
+
+    proposal = execute_purchase(
+        customer_id="CUST001",
+        product_id="KB001",
+        quantity=1,
+    )
+    token = proposal.confirmation_token
+    assert token is not None
+
+    try:
+        # Alter catalog price_paise by exactly +1 paisa in DB
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE catalog_products SET price_paise = ?, price = ? WHERE id = 'KB001';", (orig_paise + 1, round((orig_paise + 1) / 100.0, 2)))
+            conn.commit()
+
+        res = client.post(
+            "/agent/confirm",
+            headers=admin_headers,
+            json={"confirmation_token": token},
+        )
+        assert res.status_code == 409
+        data = res.json()
+        assert data["detail"]["error"] == "STALE_PRICE_DETECTED"
+    finally:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE catalog_products SET price_paise = ?, price = ? WHERE id = 'KB001';", (orig_paise, orig_price))
+            conn.commit()
+

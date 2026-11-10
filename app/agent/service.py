@@ -276,8 +276,14 @@ def execute_purchase(
     if mandate is None:
         raise MandateNotFoundError(customer_id)
 
-    # 7. Compute total transaction amount
-    amount = product.price * quantity
+    # 7. Compute total transaction amount in authoritative integer paise and decimal INR
+    from decimal import Decimal, ROUND_HALF_UP
+    if getattr(product, "price_paise", None) is not None:
+        amount_paise = product.price_paise * quantity
+        amount = round(amount_paise / 100.0, 2)
+    else:
+        amount_paise = int((Decimal(str(product.price)) * Decimal("100") * quantity).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        amount = round(amount_paise / 100.0, 2)
 
     # 8. Query approved daily spend from audit store
     current_daily_spend = audit_store.get_daily_spend(customer_id)
@@ -288,6 +294,7 @@ def execute_purchase(
         product_id=product.id,
         category=product.category,
         amount=amount,
+        amount_paise=amount_paise,
         merchant=product.merchant_id,
         quantity=quantity,
     )
@@ -299,7 +306,7 @@ def execute_purchase(
     # 11. Evaluate Gating vs Immediate Execution (Strict non-bypassable threshold)
     requires_confirmation = (
         decision.status == "APPROVED"
-        and amount >= AUTO_CONFIRM_THRESHOLD
+        and amount_paise >= 50000
     )
 
     initial_decision_status = "PENDING_CONFIRMATION" if requires_confirmation else decision.status
@@ -335,6 +342,7 @@ def execute_purchase(
             decision=initial_decision_status,
             decision_reason=decision_reason,
             idempotency_key=idempotency_key,
+            amount_paise=amount_paise,
         )
     except Exception:
         # Race condition & lock contention safeguard: check if concurrent request committed winning record
@@ -509,13 +517,21 @@ def confirm_purchase(
             available=product.stock,
         )
 
-    expected_amount = round(product.price * quantity, 2)
-    if abs(expected_amount - amount) > 0.001:
+    # Authoritative integer paise price parity check
+    from decimal import Decimal, ROUND_HALF_UP
+    if getattr(product, "price_paise", None) is not None:
+        expected_amount_paise = product.price_paise * quantity
+    else:
+        expected_amount_paise = int((Decimal(str(product.price)) * Decimal("100") * quantity).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    token_amount_paise = int((Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    if expected_amount_paise != token_amount_paise:
         audit_store.release_confirmation_claim(transaction_id)
         raise StalePriceError(
             product_id=product.id,
             proposed_amount=amount,
-            live_amount=expected_amount,
+            live_amount=round(expected_amount_paise / 100.0, 2),
         )
 
     # 3. Mandate Lookup & Deterministic Policy Re-Evaluation at Confirmation Time
@@ -530,6 +546,7 @@ def confirm_purchase(
         product_id=product.id,
         category=product.category,
         amount=amount,
+        amount_paise=expected_amount_paise,
         merchant=product.merchant_id,
         quantity=quantity,
     )

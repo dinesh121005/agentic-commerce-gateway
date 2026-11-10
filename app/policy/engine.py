@@ -66,8 +66,18 @@ def evaluate(
             reason_code="CATEGORY_UNAUTHORIZED",
         )
 
-    # 5. Transaction amount boundary check (inclusive)
-    if purchase_request.amount > mandate.max_transaction_amount:
+    # 5. Transaction amount boundary check (exact integer paise)
+    from decimal import Decimal, ROUND_HALF_UP
+    if purchase_request.amount_paise is not None:
+        req_paise = purchase_request.amount_paise
+    else:
+        req_paise = int((Decimal(str(purchase_request.amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    mandate_limit_paise = getattr(mandate, "max_amount_paise", None)
+    if mandate_limit_paise is None:
+        mandate_limit_paise = int((Decimal(str(mandate.max_transaction_amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    if req_paise > mandate_limit_paise:
         return PolicyDecision(
             status="REJECTED",
             decision=PolicyOutcome.DENY,
@@ -79,23 +89,25 @@ def evaluate(
             reason_code="AMOUNT_EXCEEDS_TRANSACTION_LIMIT",
         )
 
-    # 6. Cumulative Daily Spend Boundary Check
-    if mandate.daily_limit is not None and (current_daily_spend + purchase_request.amount) > mandate.daily_limit:
-        projected_spend = current_daily_spend + purchase_request.amount
-        return PolicyDecision(
-            status="REJECTED",
-            decision=PolicyOutcome.DENY,
-            reason=(
-                f"Transaction amount ₹{purchase_request.amount:.2f} would take today's spend to "
-                f"₹{projected_spend:.2f}, exceeding the ₹{mandate.daily_limit:.2f} daily mandate cap "
-                f"(current spend today: ₹{current_daily_spend:.2f})"
-            ),
-            rule_violated=RuleViolated.DAILY_LIMIT_EXCEEDED,
-            reason_code="DAILY_BUDGET_EXCEEDED",
-        )
+    # 6. Cumulative Daily Spend Boundary Check (exact integer paise)
+    daily_cap_paise = getattr(mandate, "daily_limit_in_paise", None)
+    if daily_cap_paise is not None:
+        daily_spent_paise = int((Decimal(str(current_daily_spend)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        if (daily_spent_paise + req_paise) > daily_cap_paise:
+            projected_spend = current_daily_spend + purchase_request.amount
+            return PolicyDecision(
+                status="REJECTED",
+                decision=PolicyOutcome.DENY,
+                reason=(
+                    f"Transaction amount ₹{purchase_request.amount:.2f} would take today's spend to "
+                    f"₹{projected_spend:.2f}, exceeding the ₹{mandate.daily_limit:.2f} daily mandate cap "
+                    f"(current spend today: ₹{current_daily_spend:.2f})"
+                ),
+                rule_violated=RuleViolated.DAILY_LIMIT_EXCEEDED,
+                reason_code="DAILY_BUDGET_EXCEEDED",
+            )
 
     # 7. Exact threshold safety evaluation (>= 50,000 paise / ₹500.00 -> STEP_UP, < 50,000 paise -> ALLOW)
-    req_paise = purchase_request.amount_paise if purchase_request.amount_paise is not None else int(round(purchase_request.amount * 100))
     if req_paise >= 50000:
         return PolicyDecision(
             status="APPROVED",

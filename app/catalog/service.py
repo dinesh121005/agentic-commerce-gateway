@@ -187,13 +187,29 @@ def _ensure_catalog_db_initialized() -> None:
 
 
 def row_to_product(row: tuple) -> Product:
-    """Converts a database tuple row into a Pydantic Product model."""
+    """Converts a database tuple row into a Pydantic Product model with authoritative price_paise."""
+    from decimal import Decimal, ROUND_HALF_UP
+    price_flt = float(row[4])
+    price_paise_val = None
+    if len(row) > 8 and row[8] is not None:
+        db_paise = int(row[8])
+        calc_paise = int((Decimal(str(price_flt)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        if abs(db_paise - calc_paise) <= 1:
+            price_paise_val = db_paise
+        else:
+            price_paise_val = calc_paise
+    else:
+        price_paise_val = int((Decimal(str(price_flt)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    price_flt = round(price_paise_val / 100.0, 2)
+
     return Product(
         id=str(row[0]),
         name=str(row[1]),
         category=str(row[2]),
         merchant_id=str(row[3]) if len(row) > 3 and row[3] else "MERCH_ELEC",
-        price=float(row[4]),
+        price=price_flt,
+        price_paise=price_paise_val,
         stock=int(row[5]),
         description=str(row[6]) if len(row) > 6 and row[6] else "",
         status=str(row[7]) if len(row) > 7 and row[7] else "ACTIVE",
@@ -214,7 +230,7 @@ def search_products(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         sql = (
-            "SELECT id, name, category, merchant_id, price, stock, description, status "
+            "SELECT id, name, category, merchant_id, price, stock, description, status, price_paise "
             "FROM catalog_products "
         )
         conditions = []
@@ -303,7 +319,7 @@ def get_product(product_id: str) -> Product:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, name, category, merchant_id, price, stock, description, status
+            SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
             FROM catalog_products
             WHERE id = ? AND status != 'ARCHIVED';
             """,
@@ -377,7 +393,7 @@ def list_products_admin() -> List[Product]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, name, category, merchant_id, price, stock, description, status
+            SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
             FROM catalog_products
             ORDER BY created_at DESC, id ASC;
             """

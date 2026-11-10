@@ -288,11 +288,18 @@ class AuditStore:
         decision_reason: str,
         timestamp: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        amount_paise: Optional[int] = None,
     ) -> None:
         """
         Phase A: Record the initial purchase proposal and deterministic policy decision with hash chain.
         """
         self._ensure_db_initialized()
+        from decimal import Decimal, ROUND_HALF_UP
+        if amount_paise is None:
+            a_paise = int((Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        else:
+            a_paise = int(amount_paise)
+
         if timestamp is None:
             timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -306,6 +313,7 @@ class AuditStore:
                 "merchant_id": merchant_id,
                 "quantity": quantity,
                 "amount": amount,
+                "amount_paise": a_paise,
                 "decision": decision,
                 "decision_reason": decision_reason,
                 "payment_status": initial_payment_status,
@@ -323,10 +331,10 @@ class AuditStore:
                 """
                 INSERT INTO audit_records (
                     transaction_id, timestamp, customer_id, product_id,
-                    merchant_id, quantity, amount, decision, decision_reason,
+                    merchant_id, quantity, amount, amount_paise, decision, decision_reason,
                     payment_status, razorpay_order_id, razorpay_payment_id, idempotency_key,
                     prev_hash, record_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?);
                 """,
                 (
                     transaction_id,
@@ -336,6 +344,7 @@ class AuditStore:
                     merchant_id,
                     quantity,
                     amount,
+                    a_paise,
                     decision,
                     decision_reason,
                     initial_payment_status,
