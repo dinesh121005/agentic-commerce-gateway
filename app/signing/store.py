@@ -728,7 +728,7 @@ class SigningStore:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT purchase_id, customer_id, canonical_payload, status, expires_at
+                SELECT purchase_id, customer_id, canonical_payload, status, expires_at, key_id
                 FROM purchase_approvals
                 WHERE approval_id = ?;
                 """,
@@ -738,9 +738,20 @@ class SigningStore:
             if not row:
                 raise ValueError("Approval record not found")
 
-            purchase_id, app_cust_id, payload_json, status, expires_at = row[0], row[1], row[2], row[3], float(row[4])
+            purchase_id, app_cust_id, payload_json, status, expires_at, expected_key_id = (
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                float(row[4]),
+                row[5],
+            )
             if app_cust_id != customer_id:
                 raise PermissionError("Approval does not belong to the authenticated customer")
+            if expected_key_id and expected_key_id != key_id:
+                raise PermissionError(
+                    f"Approval was issued specifically for key '{expected_key_id}', cannot be consumed with key '{key_id}'"
+                )
             if status != "PENDING_APPROVAL":
                 raise ValueError(f"Approval cannot be consumed: current status is {status}")
             if expires_at < now:

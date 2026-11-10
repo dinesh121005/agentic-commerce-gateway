@@ -568,3 +568,110 @@ def test_step_up_purchase_approval_consumption_success():
     assert consume2_res.status_code == 400
     assert "current status is consumed" in consume2_res.text.lower()
 
+
+def test_purchase_approval_rejected_if_signed_with_wrong_key():
+    """
+    If an approval was issued for Key A, submitting a signature from Key B
+    (even if Key B is another active key of the same customer) MUST be rejected with HTTP 403.
+    """
+    cust_headers = make_customer_auth_header("CUST001")
+
+    # 1. Register Key A
+    ch_a = client.post("/api/v1/signing/keys/challenge", headers=cust_headers, json={"device_name": "Phone-A"})
+    priv_a, pub_a_b64, _ = generate_ed25519_keypair()
+    sig_a = sign_challenge(priv_a, ch_a.json()["challenge_token"])
+    reg_a = client.post("/api/v1/signing/keys/register", headers=cust_headers, json={
+        "challenge_id": ch_a.json()["challenge_id"],
+        "public_key": pub_a_b64,
+        "signature": sig_a,
+        "device_name": "Phone-Key-A"
+    }).json()
+    key_a_id = reg_a["key_id"]
+
+    # 2. Register Key B
+    ch_b = client.post("/api/v1/signing/keys/challenge", headers=cust_headers, json={"device_name": "Laptop-B"})
+    priv_b, pub_b_b64, _ = generate_ed25519_keypair()
+    sig_b = sign_challenge(priv_b, ch_b.json()["challenge_token"])
+    reg_b = client.post("/api/v1/signing/keys/register", headers=cust_headers, json={
+        "challenge_id": ch_b.json()["challenge_id"],
+        "public_key": pub_b_b64,
+        "signature": sig_b,
+        "device_name": "Laptop-Key-B"
+    }).json()
+    key_b_id = reg_b["key_id"]
+
+    # 3. Create approval bound specifically to Key A
+    items = [{"product_id": "KB001", "quantity": 1, "unit_price_paise": 149900, "total_item_amount_paise": 149900}]
+    app_data = signing_store.create_purchase_approval(
+        purchase_id="purchase-key-binding-001",
+        customer_id="CUST001",
+        merchant_id="MERCH_ELEC",
+        mandate_id="mandate-test-002",
+        mandate_version=1,
+        key_id=key_a_id,
+        items=items,
+        subtotal_paise=149900,
+        total_payable_paise=149900,
+    )
+    approval_id = app_data["approval_id"]
+    payload_to_sign = app_data["payload_to_sign"]
+
+    # 4. Sign with Key B and attempt consumption with key_b_id -> MUST fail with 403 Forbidden
+    sig_with_b = sign_payload(priv_b, DOMAIN_APPROVAL, payload_to_sign)
+    res = client.post(
+        "/api/v1/purchases/purchase-key-binding-001/approvals/verify-and-consume",
+        headers=cust_headers,
+        json={
+            "approval_id": approval_id,
+            "key_id": key_b_id,
+            "signature": sig_with_b,
+        },
+    )
+    assert res.status_code == 403
+    assert "issued specifically for key" in res.text
+
+
+def test_purchase_approval_rejected_if_expired():
+    """Verify that an approval cannot be consumed past its expires_at TTL."""
+    cust_headers = make_customer_auth_header("CUST001")
+    ch = client.post("/api/v1/signing/keys/challenge", headers=cust_headers, json={"device_name": "Expire-Device"})
+    priv, pub_b64, _ = generate_ed25519_keypair()
+    sig = sign_challenge(priv, ch.json()["challenge_token"])
+    reg = client.post("/api/v1/signing/keys/register", headers=cust_headers, json={
+        "challenge_id": ch.json()["challenge_id"],
+        "public_key": pub_b64,
+        "signature": sig,
+        "device_name": "Expire-Key"
+    }).json()
+    key_id = reg["key_id"]
+
+    # Create approval with negative TTL (-10 seconds)
+    items = [{"product_id": "KB001", "quantity": 1, "unit_price_paise": 149900, "total_item_amount_paise": 149900}]
+    app_data = signing_store.create_purchase_approval(
+        purchase_id="purchase-expired-001",
+        customer_id="CUST001",
+        merchant_id="MERCH_ELEC",
+        mandate_id="mandate-test-003",
+        mandate_version=1,
+        key_id=key_id,
+        items=items,
+        subtotal_paise=149900,
+        total_payable_paise=149900,
+        ttl_seconds=-10,
+    )
+    approval_id = app_data["approval_id"]
+    payload_to_sign = app_data["payload_to_sign"]
+    app_sig = sign_payload(priv, DOMAIN_APPROVAL, payload_to_sign)
+
+    res = client.post(
+        "/api/v1/purchases/purchase-expired-001/approvals/verify-and-consume",
+        headers=cust_headers,
+        json={
+            "approval_id": approval_id,
+            "key_id": key_id,
+            "signature": app_sig,
+        },
+    )
+    assert res.status_code == 400
+    assert "expired" in res.text.lower()
+
