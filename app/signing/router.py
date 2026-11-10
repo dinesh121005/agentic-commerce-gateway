@@ -153,8 +153,8 @@ def submit_signed_mandate_endpoint(
     """
     try:
         result = signing_store.save_signed_mandate(
-            payload=req.payload.model_dump(),
-            envelope=req.envelope.model_dump(),
+            payload=req.payload.model_dump(exclude_unset=True),
+            envelope=req.envelope.model_dump(exclude_unset=True),
             authenticated_customer_id=customer_id,
         )
         return SignedMandateResponse(**result)

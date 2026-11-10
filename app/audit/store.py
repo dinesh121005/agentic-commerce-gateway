@@ -346,6 +346,43 @@ class AuditStore:
             )
             conn.commit()
 
+    def claim_confirmation(self, transaction_id: str) -> bool:
+        """
+        Atomically claims a confirmation token for execution (ADR-02 §4.1 item 6).
+        Transitions decision from PENDING_CONFIRMATION to CONFIRMING.
+        Returns True if this thread successfully acquired the claim.
+        Returns False if the token was already claimed or finalized by another concurrent thread.
+        """
+        self._ensure_db_initialized()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE audit_records
+                SET decision = 'CONFIRMING'
+                WHERE transaction_id = ? AND decision = 'PENDING_CONFIRMATION';
+                """,
+                (transaction_id,),
+            )
+            claimed = cursor.rowcount > 0
+            conn.commit()
+            return claimed
+
+    def release_confirmation_claim(self, transaction_id: str) -> None:
+        """Restores PENDING_CONFIRMATION state if a pre-payment check fails before payment."""
+        self._ensure_db_initialized()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE audit_records
+                SET decision = 'PENDING_CONFIRMATION'
+                WHERE transaction_id = ? AND decision = 'CONFIRMING';
+                """,
+                (transaction_id,),
+            )
+            conn.commit()
+
     def update_payment_outcome(
         self,
         transaction_id: str,
@@ -373,11 +410,11 @@ class AuditStore:
 
             timestamp, customer_id, product_id, amount, decision, idempotency_key, prev_hash = row
             final_decision = "APPROVED" if (
-                (decision in ("PENDING_CONFIRMATION", "REJECTED") and payment_status == "captured")
-                or (decision == "PENDING_CONFIRMATION" and payment_status == "created")
+                (decision in ("PENDING_CONFIRMATION", "CONFIRMING", "REJECTED") and payment_status == "captured")
+                or (decision in ("PENDING_CONFIRMATION", "CONFIRMING") and payment_status == "created")
             ) else decision
             
-            event_type = "HUMAN_CONFIRMED" if decision == "PENDING_CONFIRMATION" and payment_status == "created" else (
+            event_type = "HUMAN_CONFIRMED" if decision in ("PENDING_CONFIRMATION", "CONFIRMING") and payment_status == "created" else (
                 "PAYMENT_FAILED" if payment_status == "failed" else (
                     "PAYMENT_CAPTURED" if payment_status == "captured" else "ORDER_CREATED"
                 )

@@ -221,10 +221,38 @@ class MandateStore:
 
     def get_mandate(self, customer_id: str) -> Optional[Mandate]:
         """
-        Retrieve spending mandate for a specific customer from persistent database.
+        Retrieve spending mandate for a specific customer.
+        Prioritizes cryptographically signed mandates from Option A (signed_mandates);
+        falls back to customer_mandates for legacy demo accounts.
         Returns None if no mandate is found.
         """
         self._ensure_db_initialized()
+
+        # 1. Option A Signed Mandate Lookup
+        try:
+            from app.signing.store import signing_store
+            active_signed = signing_store.get_active_mandate(customer_id)
+            if active_signed:
+                payload = active_signed.get("payload", {})
+                exp_str = active_signed.get("valid_until") or payload.get("validity_period", {}).get("expires_at")
+                exp_dt = datetime.fromisoformat(exp_str) if exp_str else None
+                merch_id = active_signed.get("merchant_id", "*")
+                merchs = [merch_id] if merch_id != "*" else ["*"]
+                return Mandate(
+                    customer_id=active_signed["customer_id"],
+                    display_name=payload.get("display_name", f"Signed Mandate ({customer_id})"),
+                    max_transaction_amount=float(active_signed["max_transaction_amount_paise"]) / 100.0,
+                    daily_limit=float(active_signed["daily_budget_paise"]) / 100.0,
+                    currency="INR",
+                    allowed_categories=payload.get("allowed_categories", []),
+                    allowed_merchants=merchs,
+                    expires_at=exp_dt,
+                    prompt_playback=payload.get("prompt_playback", "Option A Cryptographically Signed Spending Mandate"),
+                )
+        except Exception:
+            pass
+
+        # 2. Fallback to customer_mandates database table
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

@@ -318,32 +318,27 @@ def get_product(product_id: str) -> Product:
 
 def decrement_stock(product_id: str, quantity: int = 1) -> bool:
     """
-    Safely decrements persistent inventory stock for a product upon purchase confirmation.
+    Safely decrements persistent inventory stock for a product upon purchase confirmation
+    using an atomic conditional SQL update to eliminate TOCTOU race conditions (ADR-02 §4.1).
     Automatically updates status to OUT_OF_STOCK if stock reaches 0.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+    now = time.time()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT stock FROM catalog_products WHERE id = ?;", (clean_id,))
-        row = cursor.fetchone()
-        if not row:
-            return False
-        current_stock = int(row[0])
-        if current_stock < quantity:
-            return False
-
-        new_stock = current_stock - quantity
-        new_status = "OUT_OF_STOCK" if new_stock == 0 else "ACTIVE"
-        now = time.time()
         cursor.execute(
             """
             UPDATE catalog_products
-            SET stock = ?, status = ?, updated_at = ?
-            WHERE id = ?;
+            SET stock = stock - ?,
+                status = CASE WHEN stock - ? = 0 THEN 'OUT_OF_STOCK' ELSE status END,
+                updated_at = ?
+            WHERE id = ? AND stock >= ?;
             """,
-            (new_stock, new_status, now, clean_id),
+            (quantity, quantity, now, clean_id, quantity),
         )
+        if cursor.rowcount == 0:
+            return False
         conn.commit()
         return True
 
@@ -351,27 +346,24 @@ def decrement_stock(product_id: str, quantity: int = 1) -> bool:
 def restore_stock(product_id: str, quantity: int = 1) -> None:
     """
     Restores persistent inventory stock for a product if an order is cancelled or rolled back.
+    Automatically restores status to ACTIVE if stock is restored.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+    now = time.time()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT stock, status FROM catalog_products WHERE id = ?;", (clean_id,))
-        row = cursor.fetchone()
-        if row:
-            current_stock = int(row[0])
-            new_stock = current_stock + quantity
-            new_status = "ACTIVE" if row[1] == "OUT_OF_STOCK" else row[1]
-            now = time.time()
-            cursor.execute(
-                """
-                UPDATE catalog_products
-                SET stock = ?, status = ?, updated_at = ?
-                WHERE id = ?;
-                """,
-                (new_stock, new_status, now, clean_id),
-            )
-            conn.commit()
+        cursor.execute(
+            """
+            UPDATE catalog_products
+            SET stock = stock + ?,
+                status = CASE WHEN status = 'OUT_OF_STOCK' THEN 'ACTIVE' ELSE status END,
+                updated_at = ?
+            WHERE id = ?;
+            """,
+            (quantity, now, clean_id),
+        )
+        conn.commit()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -114,65 +114,107 @@ class WalletStore:
             except Exception:
                 default_balance = 10000.0
 
-            cursor.execute(
-                """
-                INSERT INTO customer_wallets (customer_id, balance, currency, created_at, updated_at)
-                VALUES (?, ?, 'INR', ?, ?)
-                """,
-                (customer_id, default_balance, now, now),
-            )
+            cursor.execute("SELECT * FROM customer_wallets LIMIT 0;")
+            cols = [desc[0].lower() for desc in (cursor.description or [])]
+            if "balance_paise" in cols:
+                default_balance_paise = int(round(default_balance * 100))
+                cursor.execute(
+                    """
+                    INSERT INTO customer_wallets (customer_id, balance, balance_paise, currency, created_at, updated_at)
+                    VALUES (?, ?, ?, 'INR', ?, ?)
+                    """,
+                    (customer_id, default_balance, default_balance_paise, now, now),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO customer_wallets (customer_id, balance, currency, created_at, updated_at)
+                    VALUES (?, ?, 'INR', ?, ?)
+                    """,
+                    (customer_id, default_balance, now, now),
+                )
             conn.commit()
             return default_balance
 
     def debit(self, customer_id: str, amount: float) -> Tuple[bool, float, str]:
         """
-        Atomically debit customer auto-pay balance.
+        Atomically debits customer auto-pay balance using atomic conditional SQL update
+        to eliminate check-then-act double-spending race conditions (ADR-02 §4.1).
+        Dual-updates both balance (float) and balance_paise (integer).
         Returns (success: bool, remaining_balance: float, message: str).
         """
         self._ensure_db_initialized()
-        current_bal = self.get_balance(customer_id)
-        if current_bal < amount:
-            return False, current_bal, f"Insufficient auto-pay balance (₹{current_bal:.2f} < ₹{amount:.2f})"
-
+        from decimal import Decimal, ROUND_HALF_UP
+        amount_paise = int((Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         now = time.time()
-        new_balance = round(current_bal - amount, 2)
+
+        # Ensure wallet exists before atomic update
+        self.get_balance(customer_id)
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE customer_wallets SET balance = ?, updated_at = ? WHERE customer_id = ?",
-                (new_balance, now, customer_id),
+                """
+                UPDATE customer_wallets
+                SET balance = balance - ?,
+                    balance_paise = COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) - ?,
+                    updated_at = ?
+                WHERE customer_id = ?
+                  AND (balance_paise >= ? OR balance >= ?);
+                """,
+                (amount, amount_paise, now, customer_id, amount_paise, amount),
             )
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT balance FROM customer_wallets WHERE customer_id = ?;", (customer_id,))
+                row = cursor.fetchone()
+                current_bal = float(row[0]) if row else 0.0
+                return False, current_bal, f"Insufficient auto-pay balance (₹{current_bal:.2f} < ₹{amount:.2f})"
             conn.commit()
-        return True, new_balance, f"Auto-debited ₹{amount:.2f} (Remaining balance: ₹{new_balance:.2f})"
+
+            cursor.execute("SELECT balance FROM customer_wallets WHERE customer_id = ?;", (customer_id,))
+            remaining_bal = float(cursor.fetchone()[0])
+            return True, remaining_bal, f"Auto-debited ₹{amount:.2f} (Remaining balance: ₹{remaining_bal:.2f})"
 
     def credit(self, customer_id: str, amount: float) -> float:
         """Atomically credit customer auto-pay balance."""
         self._ensure_db_initialized()
-        current_bal = self.get_balance(customer_id)
-        new_balance = round(current_bal + amount, 2)
-        now = time.time()
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE customer_wallets SET balance = ?, updated_at = ? WHERE customer_id = ?",
-                (new_balance, now, customer_id),
-            )
-            conn.commit()
-        return new_balance
-
-    def set_balance(self, customer_id: str, balance: float) -> None:
-        """Set explicit customer balance (for admin or testing)."""
-        self._ensure_db_initialized()
+        from decimal import Decimal, ROUND_HALF_UP
+        amount_paise = int((Decimal(str(amount)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         now = time.time()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO customer_wallets (customer_id, balance, currency, created_at, updated_at)
-                VALUES (?, ?, 'INR', ?, ?)
-                ON CONFLICT(customer_id) DO UPDATE SET balance = excluded.balance, updated_at = excluded.updated_at
+                UPDATE customer_wallets
+                SET balance = balance + ?,
+                    balance_paise = COALESCE(balance_paise, CAST(ROUND(balance * 100) AS INTEGER)) + ?,
+                    updated_at = ?
+                WHERE customer_id = ?;
                 """,
-                (customer_id, balance, now, now),
+                (amount, amount_paise, now, customer_id),
+            )
+            conn.commit()
+            cursor.execute("SELECT balance FROM customer_wallets WHERE customer_id = ?;", (customer_id,))
+            return float(cursor.fetchone()[0])
+
+    def set_balance(self, customer_id: str, balance: float) -> None:
+        """Set explicit customer balance (for admin or testing)."""
+        self._ensure_db_initialized()
+        from decimal import Decimal, ROUND_HALF_UP
+        balance_paise = int((Decimal(str(balance)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+        now = time.time()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO customer_wallets (customer_id, balance, balance_paise, currency, created_at, updated_at)
+                VALUES (?, ?, ?, 'INR', ?, ?)
+                ON CONFLICT(customer_id) DO UPDATE SET
+                    balance = excluded.balance,
+                    balance_paise = excluded.balance_paise,
+                    updated_at = excluded.updated_at;
+                """,
+                (customer_id, balance, balance_paise, now, now),
             )
             conn.commit()
 
