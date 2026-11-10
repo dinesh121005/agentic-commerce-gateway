@@ -358,46 +358,48 @@ def execute_purchase(
     final_decision = initial_decision_status
 
     if decision.status == "APPROVED" and not requires_confirmation:
-        # 1. Create Razorpay Test Order
-        payment_result = create_order_for_approved(
-            amount_inr=amount,
-            receipt=transaction_id,
-            customer_id=customer_id,
-            product_id=product.id,
-        )
-        if payment_result.status == "failed":
+        # 1. Atomic inventory stock reservation (concurrency guard against overselling)
+        if not decrement_stock(product.id, quantity):
             final_decision = "PAYMENT_FAILED"
-            decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay payment rail failed: {payment_result.error}"
+            decision_reason = f"Stock was depleted before order settlement: insufficient inventory."
+            payment_result = PaymentResult(status="failed", error="Insufficient inventory stock")
             audit_store.update_payment_outcome(
                 transaction_id=transaction_id,
                 payment_status="failed",
-                razorpay_order_id=payment_result.razorpay_order_id,
-            )
-        elif payment_result.status == "status_unknown":
-            final_decision = "PAYMENT_FAILED"
-            decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay returned unknown status: {payment_result.error}"
-            audit_store.update_payment_outcome(
-                transaction_id=transaction_id,
-                payment_status="status_unknown",
-                razorpay_order_id=payment_result.razorpay_order_id,
             )
         else:
-            # 2. Atomic stock decrement (concurrency guard against overselling)
-            if not decrement_stock(product.id, quantity):
+            # 2. Create Razorpay Test Order with inventory reserved
+            payment_result = create_order_for_approved(
+                amount_inr=amount,
+                receipt=transaction_id,
+                customer_id=customer_id,
+                product_id=product.id,
+            )
+            if payment_result.status == "failed":
+                # Saga compensating rollback: release reserved stock
+                restore_stock(product.id, quantity)
                 final_decision = "PAYMENT_FAILED"
-                decision_reason = f"Stock was depleted before order settlement: insufficient inventory."
-                payment_result.status = "failed"
-                payment_result.error = "Insufficient inventory stock"
+                decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay payment rail failed: {payment_result.error}"
                 audit_store.update_payment_outcome(
                     transaction_id=transaction_id,
                     payment_status="failed",
+                    razorpay_order_id=payment_result.razorpay_order_id,
+                )
+            elif payment_result.status == "status_unknown":
+                # Saga compensating rollback: release reserved stock
+                restore_stock(product.id, quantity)
+                final_decision = "PAYMENT_FAILED"
+                decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay returned unknown status: {payment_result.error}"
+                audit_store.update_payment_outcome(
+                    transaction_id=transaction_id,
+                    payment_status="status_unknown",
                     razorpay_order_id=payment_result.razorpay_order_id,
                 )
             else:
                 # 3. Auto-debit customer pre-authorized sandbox mandate balance
                 debit_success, remaining_bal, debit_msg = wallet_store.debit(customer_id, amount)
                 if not debit_success:
-                    # Saga compensating rollback: restore decremented inventory stock
+                    # Saga compensating rollback: release reserved stock
                     restore_stock(product.id, quantity)
                     final_decision = "PAYMENT_FAILED"
                     decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but sandbox mandate wallet debit failed: {debit_msg}"
@@ -557,47 +559,49 @@ def confirm_purchase(
 
     limit = mandate.max_transaction_amount
 
-    # 4. Execute Razorpay payment order
-    payment_result = create_order_for_approved(
-        amount_inr=amount,
-        receipt=transaction_id,
-        customer_id=token_customer_id,
-        product_id=product.id,
-    )
-
-    if payment_result.status == "failed":
+    # 1. Atomic inventory stock reservation
+    if not decrement_stock(product.id, quantity):
         final_decision = "PAYMENT_FAILED"
-        reason = f"Human confirmation verified, but Razorpay payment rail failed: {payment_result.error}"
+        reason = f"Human confirmation verified, but stock was depleted: insufficient inventory."
+        payment_result = PaymentResult(status="failed", error="Insufficient inventory stock")
         audit_store.update_payment_outcome(
             transaction_id=transaction_id,
             payment_status="failed",
-            razorpay_order_id=payment_result.razorpay_order_id,
-        )
-    elif payment_result.status == "status_unknown":
-        final_decision = "PAYMENT_FAILED"
-        reason = f"Human confirmation verified, but Razorpay returned unknown status: {payment_result.error}"
-        audit_store.update_payment_outcome(
-            transaction_id=transaction_id,
-            payment_status="status_unknown",
-            razorpay_order_id=payment_result.razorpay_order_id,
         )
     else:
-        # 1. Atomic inventory stock decrement (concurrency guard against overselling)
-        if not decrement_stock(product.id, quantity):
+        # 2. Execute Razorpay payment order with inventory reserved
+        payment_result = create_order_for_approved(
+            amount_inr=amount,
+            receipt=transaction_id,
+            customer_id=token_customer_id,
+            product_id=product.id,
+        )
+
+        if payment_result.status == "failed":
+            # Saga compensating rollback: release reserved stock
+            restore_stock(product.id, quantity)
             final_decision = "PAYMENT_FAILED"
-            reason = f"Human confirmation verified, but stock was depleted: insufficient inventory."
-            payment_result.status = "failed"
-            payment_result.error = "Insufficient inventory stock"
+            reason = f"Human confirmation verified, but Razorpay payment rail failed: {payment_result.error}"
             audit_store.update_payment_outcome(
                 transaction_id=transaction_id,
                 payment_status="failed",
                 razorpay_order_id=payment_result.razorpay_order_id,
             )
+        elif payment_result.status == "status_unknown":
+            # Saga compensating rollback: release reserved stock
+            restore_stock(product.id, quantity)
+            final_decision = "PAYMENT_FAILED"
+            reason = f"Human confirmation verified, but Razorpay returned unknown status: {payment_result.error}"
+            audit_store.update_payment_outcome(
+                transaction_id=transaction_id,
+                payment_status="status_unknown",
+                razorpay_order_id=payment_result.razorpay_order_id,
+            )
         else:
-            # 2. Auto-debit customer pre-authorized balance
+            # 3. Auto-debit customer pre-authorized balance
             debit_success, remaining_bal, debit_msg = wallet_store.debit(token_customer_id, amount)
             if not debit_success:
-                # Saga compensating rollback: restore decremented stock
+                # Saga compensating rollback: release reserved stock
                 restore_stock(product.id, quantity)
                 final_decision = "PAYMENT_FAILED"
                 reason = f"Human confirmation verified, but sandbox mandate wallet debit failed: {debit_msg}"

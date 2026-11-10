@@ -261,3 +261,59 @@ def test_audit_daily_spend_paise_exact_aggregation():
     inr_total = audit_store.get_daily_spend(cust_id)
     assert inr_total == 100.0
 
+
+def test_inventory_reservation_fails_without_creating_order():
+    """
+    If inventory is depleted, execute_purchase/confirm_purchase must fail immediately
+    WITHOUT invoking the external payment order creation service.
+    """
+    _ensure_catalog_db_initialized()
+    from app.exceptions import InsufficientStockError
+
+    # Set FD001 stock to 0
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_products SET stock = 0, status = 'OUT_OF_STOCK' WHERE id = 'FD001';")
+        conn.commit()
+
+    with patch("app.agent.service.create_order_for_approved") as mock_pay:
+        # Pre-check rejects without calling payment
+        with pytest.raises(InsufficientStockError):
+            execute_purchase(customer_id="CUST001", product_id="FD001", quantity=1)
+        mock_pay.assert_not_called()
+
+    # Restore stock to 1, but simulate race condition where decrement_stock returns False
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_products SET stock = 1, status = 'ACTIVE' WHERE id = 'FD001';")
+        conn.commit()
+
+    with patch("app.agent.service.create_order_for_approved") as mock_pay, patch("app.agent.service.decrement_stock", return_value=False):
+        res = execute_purchase(customer_id="CUST001", product_id="FD001", quantity=1)
+        assert res.decision == "PAYMENT_FAILED"
+        assert "insufficient inventory" in res.reason.lower()
+        mock_pay.assert_not_called()
+
+
+def test_order_creation_failure_compensates_reserved_stock():
+    """
+    If inventory is successfully reserved but external payment order creation fails,
+    reserved inventory MUST be compensated immediately via restore_stock.
+    """
+    _ensure_catalog_db_initialized()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE catalog_products SET stock = 5, status = 'ACTIVE' WHERE id = 'FD001';")
+        conn.commit()
+
+    with patch("app.agent.service.create_order_for_approved") as mock_pay:
+        mock_pay.return_value = PaymentResult(status="failed", error="Gateway timeout")
+
+        res = execute_purchase(customer_id="CUST001", product_id="FD001", quantity=1)
+        assert res.decision == "PAYMENT_FAILED"
+        assert "payment rail failed" in res.reason.lower()
+
+        # Reserved stock MUST be compensated back to 5!
+        prod = get_product("FD001")
+        assert prod.stock == 5
+
