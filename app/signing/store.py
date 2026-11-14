@@ -59,6 +59,19 @@ class SigningStore:
 
     def _ensure_db_initialized(self) -> None:
         if not self._initialized:
+            from app.db import is_postgres_url
+            if is_postgres_url(self.db_path):
+                try:
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'customer_signing_keys';"
+                        )
+                        if cursor.fetchone():
+                            self._initialized = True
+                            return
+                except Exception:
+                    pass
             self._init_db()
             self._initialized = True
 

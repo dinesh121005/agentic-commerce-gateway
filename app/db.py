@@ -122,6 +122,7 @@ class PostgresConnectionWrapper:
 def get_db_connection(db_path_or_url: Optional[str] = None) -> Generator[Any, None, None]:
     """
     Yields an active database connection (SQLite or PostgreSQL) based on configuration.
+    Propagates trusted request-scoped TenantContext into PostgreSQL transactions via SET LOCAL.
     """
     raw_url = db_path_or_url or os.getenv("DATABASE_URL", "gateway.db")
 
@@ -134,7 +135,22 @@ def get_db_connection(db_path_or_url: Optional[str] = None) -> Generator[Any, No
         pg_url = normalize_postgres_url(raw_url)
         raw_conn = psycopg2.connect(pg_url, connect_timeout=10)
         wrapper = PostgresConnectionWrapper(raw_conn)
+
+        # Propagate trusted server-side TenantContext and CustomerContext into the PostgreSQL transaction
+        from app.core.context import get_current_tenant_context, get_current_customer_context
+        tenant_ctx = get_current_tenant_context()
+        customer_ctx = get_current_customer_context()
         try:
+            with raw_conn.cursor() as cur:
+                if tenant_ctx is not None and tenant_ctx.merchant_id:
+                    cur.execute("SET LOCAL app.current_merchant_id = %s;", (tenant_ctx.merchant_id.strip(),))
+                else:
+                    cur.execute("SET LOCAL app.current_merchant_id = '';")
+
+                if customer_ctx is not None and customer_ctx.customer_id:
+                    cur.execute("SET LOCAL app.current_customer_id = %s;", (customer_ctx.customer_id.strip(),))
+                else:
+                    cur.execute("SET LOCAL app.current_customer_id = '';")
             yield wrapper
         except Exception:
             wrapper.rollback()

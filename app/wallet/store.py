@@ -44,6 +44,19 @@ class WalletStore:
 
     def _ensure_db_initialized(self) -> None:
         if not self._initialized:
+            from app.db import is_postgres_url
+            if is_postgres_url(self.db_path):
+                try:
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'customer_wallets';"
+                        )
+                        if cursor.fetchone():
+                            self._initialized = True
+                            return
+                except Exception:
+                    pass
             self._init_db()
             self._initialized = True
 
@@ -82,7 +95,7 @@ class WalletStore:
                     cursor.execute("ALTER TABLE customer_wallets ADD COLUMN balance_paise INTEGER;")
                     conn.commit()
                 except Exception:
-                    pass
+                    conn.rollback()
                 try:
                     from decimal import Decimal, ROUND_HALF_UP
                     cursor.execute("SELECT customer_id, balance FROM customer_wallets WHERE balance_paise IS NULL;")
@@ -91,7 +104,7 @@ class WalletStore:
                         cursor.execute("UPDATE customer_wallets SET balance_paise = ? WHERE customer_id = ?;", (b_paise, cid))
                     conn.commit()
                 except Exception:
-                    pass
+                    conn.rollback()
 
     def get_balance(self, customer_id: str) -> float:
         """Return the current auto-pay balance for a customer in INR."""

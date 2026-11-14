@@ -359,7 +359,7 @@ def execute_purchase(
 
     if decision.status == "APPROVED" and not requires_confirmation:
         # 1. Atomic inventory stock reservation (concurrency guard against overselling)
-        if not decrement_stock(product.id, quantity):
+        if not decrement_stock(product.id, quantity, merchant_id=product.merchant_id):
             final_decision = "PAYMENT_FAILED"
             decision_reason = f"Stock was depleted before order settlement: insufficient inventory."
             payment_result = PaymentResult(status="failed", error="Insufficient inventory stock")
@@ -377,7 +377,7 @@ def execute_purchase(
             )
             if payment_result.status == "failed":
                 # Saga compensating rollback: release reserved stock
-                restore_stock(product.id, quantity)
+                restore_stock(product.id, quantity, merchant_id=product.merchant_id)
                 final_decision = "PAYMENT_FAILED"
                 decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay payment rail failed: {payment_result.error}"
                 audit_store.update_payment_outcome(
@@ -387,7 +387,7 @@ def execute_purchase(
                 )
             elif payment_result.status == "status_unknown":
                 # Saga compensating rollback: release reserved stock
-                restore_stock(product.id, quantity)
+                restore_stock(product.id, quantity, merchant_id=product.merchant_id)
                 final_decision = "PAYMENT_FAILED"
                 decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but Razorpay returned unknown status: {payment_result.error}"
                 audit_store.update_payment_outcome(
@@ -400,7 +400,7 @@ def execute_purchase(
                 debit_success, remaining_bal, debit_msg = wallet_store.debit(customer_id, amount)
                 if not debit_success:
                     # Saga compensating rollback: release reserved stock
-                    restore_stock(product.id, quantity)
+                    restore_stock(product.id, quantity, merchant_id=product.merchant_id)
                     final_decision = "PAYMENT_FAILED"
                     decision_reason = f"Policy approved purchase of {product.name} (₹{amount:.2f}), but sandbox mandate wallet debit failed: {debit_msg}"
                     payment_result.status = "failed"
@@ -560,7 +560,7 @@ def confirm_purchase(
     limit = mandate.max_transaction_amount
 
     # 1. Atomic inventory stock reservation
-    if not decrement_stock(product.id, quantity):
+    if not decrement_stock(product.id, quantity, merchant_id=product.merchant_id):
         final_decision = "PAYMENT_FAILED"
         reason = f"Human confirmation verified, but stock was depleted: insufficient inventory."
         payment_result = PaymentResult(status="failed", error="Insufficient inventory stock")
@@ -579,7 +579,7 @@ def confirm_purchase(
 
         if payment_result.status == "failed":
             # Saga compensating rollback: release reserved stock
-            restore_stock(product.id, quantity)
+            restore_stock(product.id, quantity, merchant_id=product.merchant_id)
             final_decision = "PAYMENT_FAILED"
             reason = f"Human confirmation verified, but Razorpay payment rail failed: {payment_result.error}"
             audit_store.update_payment_outcome(
@@ -589,7 +589,7 @@ def confirm_purchase(
             )
         elif payment_result.status == "status_unknown":
             # Saga compensating rollback: release reserved stock
-            restore_stock(product.id, quantity)
+            restore_stock(product.id, quantity, merchant_id=product.merchant_id)
             final_decision = "PAYMENT_FAILED"
             reason = f"Human confirmation verified, but Razorpay returned unknown status: {payment_result.error}"
             audit_store.update_payment_outcome(
@@ -602,7 +602,7 @@ def confirm_purchase(
             debit_success, remaining_bal, debit_msg = wallet_store.debit(token_customer_id, amount)
             if not debit_success:
                 # Saga compensating rollback: release reserved stock
-                restore_stock(product.id, quantity)
+                restore_stock(product.id, quantity, merchant_id=product.merchant_id)
                 final_decision = "PAYMENT_FAILED"
                 reason = f"Human confirmation verified, but sandbox mandate wallet debit failed: {debit_msg}"
                 payment_result.status = "failed"

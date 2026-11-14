@@ -18,6 +18,8 @@ from app.oauth.store import customer_auth_store
 from app.policy.store import DEMO_MANDATES, mandate_store
 from app.signing.store import signing_store
 from app.wallet.store import wallet_store
+from app.merchant.store import merchant_store
+from app.merchant.rate_limit import login_rate_limiter
 
 
 @pytest.fixture(autouse=True)
@@ -27,9 +29,11 @@ def isolate_test_environment(tmp_path, monkeypatch):
     - Points audit_store, customer_auth_store, mandate_store, and wallet_store to an isolated temp SQLite DB.
     - Initializes schemas in the temporary database.
     - Resets the in-memory mandate store to DEMO_MANDATES.
+    - Resets the merchant login rate limiter.
     - Performs clean teardown with garbage collection to release SQLite file handles on Windows.
     """
     import gc
+    login_rate_limiter.reset()
     test_db = str(tmp_path / "test_isolated_gateway.db")
     monkeypatch.setenv("DATABASE_URL", test_db)
     monkeypatch.setattr(audit_store, "db_path", test_db)
@@ -37,12 +41,14 @@ def isolate_test_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(mandate_store, "db_path", test_db)
     monkeypatch.setattr(signing_store, "db_path", test_db)
     monkeypatch.setattr(wallet_store, "db_path", test_db)
+    monkeypatch.setattr(merchant_store, "db_path", test_db)
     monkeypatch.setattr(catalog_service, "_catalog_initialized", False)
     audit_store._init_db()
     customer_auth_store._init_db()
     mandate_store._init_db()
     signing_store._init_db()
     wallet_store._init_db()
+    merchant_store._init_db()
 
     yield test_db
 

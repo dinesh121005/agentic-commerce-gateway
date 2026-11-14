@@ -177,6 +177,8 @@ def search_products_handler(
     """
     Handler executing product search against the catalog service.
     Returns list of matching product dicts with customer-facing fields (id, name, category, price).
+    Enforces tenant scoping: restricts products strictly to merchants authorized
+    under the active customer's mandate (or explicit allowed_merchants).
     """
     try:
         raw_query = query or kwargs.get("search_query") or kwargs.get("q") or kwargs.get("text") or kwargs.get("input") or kwargs.get("name")
@@ -189,7 +191,32 @@ def search_products_handler(
             except (ValueError, TypeError):
                 clean_max_price = None
 
-        products = search_products(query=clean_query, category=clean_category, max_price=clean_max_price)
+        eff_cust = authenticated_customer_id.get() or kwargs.get("customer_id")
+        allowed_merchants: List[str] = []
+        if eff_cust:
+            mandate = mandate_store.get_mandate(eff_cust)
+            if mandate and mandate.allowed_merchants:
+                allowed_merchants = [m.strip() for m in mandate.allowed_merchants if m.strip()]
+
+        explicit_merchant = kwargs.get("merchant_id")
+        if explicit_merchant:
+            if allowed_merchants and explicit_merchant not in allowed_merchants:
+                return []
+            products = search_products(query=clean_query, category=clean_category, max_price=clean_max_price, merchant_id=explicit_merchant)
+        elif allowed_merchants:
+            all_found = []
+            seen_ids = set()
+            for m_id in allowed_merchants:
+                m_prods = search_products(query=clean_query, category=clean_category, max_price=clean_max_price, merchant_id=m_id)
+                for p in m_prods:
+                    if (p.merchant_id, p.id) not in seen_ids:
+                        seen_ids.add((p.merchant_id, p.id))
+                        all_found.append(p)
+            products = all_found
+        else:
+            # Public unauthenticated search matches REST GET /products
+            products = search_products(query=clean_query, category=clean_category, max_price=clean_max_price)
+
         return [
             {
                 "id": p.id,

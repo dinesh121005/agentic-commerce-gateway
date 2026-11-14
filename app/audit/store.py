@@ -90,9 +90,58 @@ class AuditStore:
         with get_db_connection(self.db_path) as conn:
             yield conn
 
+    @contextlib.contextmanager
+    def _get_system_audit_connection(self) -> Generator[Any, None, None]:
+        """
+        Create a dedicated system audit database connection (role: system_audit_writer) for system audit events.
+        Fails closed if the required system_audit_writer credential is not configured.
+        """
+        from app.db import is_postgres_url, get_db_connection
+        if is_postgres_url(self.db_path):
+            audit_url = os.environ.get("LOCAL_PG_AUDIT_URL") or os.environ.get("PG_AUDIT_URL")
+            if not audit_url:
+                raise RuntimeError(
+                    "Security failure: Missing required database connection URL for system_audit_writer role: LOCAL_PG_AUDIT_URL"
+                )
+            with get_db_connection(audit_url) as conn:
+                yield conn
+        else:
+            with self._get_connection() as conn:
+                yield conn
+
+    @contextlib.contextmanager
+    def _get_admin_connection(self) -> Generator[Any, None, None]:
+        """
+        Create an administrative database connection for privileged audit verification workflows.
+        Explicitly restricted to migration/audit tools; not used by application runtime paths.
+        """
+        from app.db import is_postgres_url, get_db_connection
+        admin_url = os.environ.get("LOCAL_PG_ADMIN_URL") or os.environ.get("PG_ADMIN_URL")
+        if admin_url and is_postgres_url(self.db_path):
+            with get_db_connection(admin_url) as conn:
+                yield conn
+        else:
+            with self._get_connection() as conn:
+                yield conn
+
     def _ensure_db_initialized(self) -> None:
         """Ensure the table schema exists before operations."""
         if not self._initialized:
+            from app.db import is_postgres_url
+            if is_postgres_url(self.db_path):
+                # On PostgreSQL, schema DDL is managed ahead-of-time by gateway_admin migrations.
+                # If tables already exist, skip DDL to avoid unprivileged execution by app_user.
+                try:
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_events';"
+                        )
+                        if cursor.fetchone():
+                            self._initialized = True
+                            return
+                except Exception:
+                    pass
             self._init_db()
             self._initialized = True
 
@@ -161,13 +210,55 @@ class AuditStore:
                     timestamp TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     prev_hash TEXT NOT NULL,
-                    event_hash TEXT NOT NULL
+                    event_hash TEXT NOT NULL,
+                    merchant_id TEXT
                 );
                 """
             )
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_events_tx ON audit_events(transaction_id);"
             )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_events_merchant ON audit_events(merchant_id);"
+            )
+
+            # Migration: ensure merchant_id column exists on existing audit_events table
+            cursor.execute("SELECT * FROM audit_events LIMIT 0;")
+            existing_event_cols = [desc[0].lower() for desc in (cursor.description or [])]
+            if "merchant_id" not in existing_event_cols:
+                try:
+                    cursor.execute("ALTER TABLE audit_events ADD COLUMN merchant_id TEXT;")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                try:
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_merchant ON audit_events(merchant_id);")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
+            # Backfill provable merchant_id ownership from audit_records without altering hash-chain payloads
+            try:
+                cursor.execute(
+                    """
+                    UPDATE audit_events
+                    SET merchant_id = (
+                        SELECT r.merchant_id 
+                        FROM audit_records r 
+                        WHERE r.transaction_id = audit_events.transaction_id
+                        LIMIT 1
+                    )
+                    WHERE merchant_id IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM audit_records r
+                        WHERE r.transaction_id = audit_events.transaction_id
+                          AND r.merchant_id IS NOT NULL
+                    );
+                    """
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
 
             # Persistent Webhook Event Deduplication Ledger
             cursor.execute(
@@ -215,8 +306,29 @@ class AuditStore:
             conn.commit()
 
 
+    def _has_pg_audit_functions(self, cursor: Any) -> bool:
+        """Checks if trusted PostgreSQL audit functions exist in the database."""
+        from app.db import is_postgres_url
+        if not is_postgres_url(self.db_path):
+            return False
+        if getattr(self, "_pg_audit_funcs_available", None) is not None:
+            return self._pg_audit_funcs_available
+        try:
+            cursor.execute("SELECT to_regproc('public.get_latest_audit_event_hash') IS NOT NULL;")
+            row = cursor.fetchone()
+            self._pg_audit_funcs_available = bool(row and row[0])
+        except Exception:
+            self._pg_audit_funcs_available = False
+        return self._pg_audit_funcs_available
+
     def _get_latest_event_hash(self, cursor: Any) -> str:
         """Retrieves the event_hash of the most recently appended audit event, or 'GENESIS'."""
+        if self._has_pg_audit_functions(cursor):
+            cursor.execute("SELECT public.get_latest_audit_event_hash();")
+            row = cursor.fetchone()
+            if row and row[0]:
+                return row[0]
+            return "GENESIS"
         cursor.execute("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1;")
         row = cursor.fetchone()
         if row and row[0]:
@@ -230,6 +342,7 @@ class AuditStore:
         event_type: str,
         payload_dict: dict,
         timestamp: Optional[str] = None,
+        is_system_event: Optional[bool] = None,
     ) -> Tuple[str, str]:
         """
         Appends a tamper-evident event block to the cryptographic ledger.
@@ -248,14 +361,52 @@ class AuditStore:
             timestamp=timestamp,
             payload_json=payload_json,
         )
-        cursor.execute(
-            """
-            INSERT INTO audit_events (
-                event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?);
-            """,
-            (event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash)
-        )
+        # Derive merchant_id ownership with strict server-side precedence:
+        # 1. Authoritative request-scoped TenantContext (cannot be spoofed by caller payload)
+        # 2. Trusted prior audit_record (e.g., during async callbacks / compensations)
+        # 3. Payload-specified merchant_id ONLY when establishing proposals without TenantContext
+        # 4. System events remain merchant_id = NULL (never query audit_records to preserve zero-table privilege)
+        from app.core.context import get_current_tenant_context
+        tenant_ctx = get_current_tenant_context()
+
+        merchant_id = None
+        if is_system_event is True:
+            merchant_id = None
+        elif tenant_ctx is not None and tenant_ctx.merchant_id:
+            # Server-side context is authoritative; caller cannot inject another tenant's merchant_id
+            merchant_id = tenant_ctx.merchant_id
+        elif payload_dict.get("merchant_id"):
+            merchant_id = payload_dict.get("merchant_id")
+        elif transaction_id:
+            try:
+                cursor.execute(
+                    "SELECT merchant_id FROM audit_records WHERE transaction_id = ? LIMIT 1;",
+                    (transaction_id,),
+                )
+                r_row = cursor.fetchone()
+                if r_row and r_row[0]:
+                    merchant_id = r_row[0]
+            except Exception:
+                pass
+
+        if merchant_id is None and self._has_pg_audit_functions(cursor):
+            cursor.execute(
+                """
+                SELECT public.append_system_audit_event(
+                    ?, ?, ?, ?, ?, ?, ?
+                );
+                """,
+                (event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash)
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO audit_events (
+                    event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash, merchant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (event_id, transaction_id, event_type, timestamp, payload_json, prev_hash, event_hash, merchant_id)
+            )
         return event_hash, prev_hash
 
     def append_event(
@@ -270,9 +421,23 @@ class AuditStore:
         Used for key lifecycle events, mandate registration/revocation, and approval events.
         """
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        from app.core.context import get_current_tenant_context
+        tenant_ctx = get_current_tenant_context()
+        is_system_event = (
+            (tenant_ctx is None or not tenant_ctx.merchant_id)
+            and not payload_dict.get("merchant_id")
+        )
+        conn_ctx = self._get_system_audit_connection() if is_system_event else self._get_connection()
+        with conn_ctx as conn:
             cursor = conn.cursor()
-            res = self._append_event(cursor, transaction_id, event_type, payload_dict, timestamp)
+            res = self._append_event(
+                cursor,
+                transaction_id,
+                event_type,
+                payload_dict,
+                timestamp,
+                is_system_event=is_system_event,
+            )
             conn.commit()
             return res
 
@@ -548,7 +713,9 @@ class AuditStore:
         SHA-256 hash chaining and data consistency.
         """
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        from app.db import is_postgres_url
+        conn_ctx = self._get_admin_connection() if is_postgres_url(self.db_path) else self._get_connection()
+        with conn_ctx as conn:
             cursor = conn.cursor()
             # 1. First check append-only audit_events table
             cursor.execute(
@@ -683,9 +850,21 @@ class AuditStore:
         customer_id: Optional[str] = None,
         decision: Optional[str] = None,
         payment_status: Optional[str] = None,
+        merchant_id: Optional[str] = None,
     ) -> List[AuditRecord]:
-        """Retrieve audit records ordered newest-first, with optional filtering."""
+        """Retrieve audit records ordered newest-first, with optional filtering and tenant isolation."""
         self._ensure_db_initialized()
+        from app.core.context import get_current_tenant_context
+        tenant_ctx = get_current_tenant_context()
+
+        effective_merchant_id = None
+        if tenant_ctx is not None:
+            if merchant_id is not None and merchant_id != tenant_ctx.merchant_id:
+                return []
+            effective_merchant_id = tenant_ctx.merchant_id
+        elif merchant_id is not None:
+            effective_merchant_id = merchant_id
+
         query = (
             "SELECT transaction_id, timestamp, customer_id, product_id, merchant_id, "
             "quantity, amount, decision, decision_reason, payment_status, razorpay_order_id, razorpay_payment_id, idempotency_key, "
@@ -695,6 +874,9 @@ class AuditStore:
         conditions = []
         params = []
 
+        if effective_merchant_id and effective_merchant_id.strip():
+            conditions.append("merchant_id = ?")
+            params.append(effective_merchant_id.strip())
         if customer_id and customer_id.strip():
             conditions.append("customer_id = ?")
             params.append(customer_id.strip())
@@ -735,19 +917,36 @@ class AuditStore:
                 for row in rows
             ]
 
-    def get(self, transaction_id: str) -> Optional[AuditRecord]:
-        """Retrieve a single audit record by its transaction_id."""
+    def get(self, transaction_id: str, merchant_id: Optional[str] = None) -> Optional[AuditRecord]:
+        """Retrieve a single audit record by its transaction_id, enforcing tenant isolation."""
         self._ensure_db_initialized()
+        from app.core.context import get_current_tenant_context
+        tenant_ctx = get_current_tenant_context()
+
+        effective_merchant_id = None
+        if tenant_ctx is not None:
+            if merchant_id is not None and merchant_id != tenant_ctx.merchant_id:
+                return None
+            effective_merchant_id = tenant_ctx.merchant_id
+        elif merchant_id is not None:
+            effective_merchant_id = merchant_id
+
+        conditions = ["transaction_id = ?"]
+        params = [transaction_id]
+        if effective_merchant_id:
+            conditions.append("merchant_id = ?")
+            params.append(effective_merchant_id)
+
         query = (
             "SELECT transaction_id, timestamp, customer_id, product_id, merchant_id, "
             "quantity, amount, decision, decision_reason, payment_status, razorpay_order_id, razorpay_payment_id, idempotency_key, "
             "prev_hash, record_hash "
             "FROM audit_records "
-            "WHERE transaction_id = ?;"
+            f"WHERE {' AND '.join(conditions)};"
         )
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(query, (transaction_id,))
+            cursor.execute(query, tuple(params))
             row = cursor.fetchone()
             if row is None:
                 return None
@@ -807,11 +1006,11 @@ class AuditStore:
             )
 
     def is_webhook_processed(self, event_id: str) -> bool:
-        """Checks if a Razorpay webhook event has already been processed (persistent deduplication)."""
+        """Checks if a Razorpay webhook event has already been processed (persistent deduplication) via system audit connection."""
         if not event_id or not event_id.strip():
             return False
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        with self._get_system_audit_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT 1 FROM processed_webhook_events WHERE event_id = ?;",
@@ -820,11 +1019,11 @@ class AuditStore:
             return cursor.fetchone() is not None
 
     def record_webhook_event(self, event_id: str) -> None:
-        """Persists a processed webhook event ID into the database."""
+        """Persists a processed webhook event ID into the database via system audit connection."""
         if not event_id or not event_id.strip():
             return
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        with self._get_system_audit_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO processed_webhook_events (event_id, received_at) VALUES (?, ?) ON CONFLICT(event_id) DO NOTHING;",

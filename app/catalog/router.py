@@ -35,24 +35,30 @@ def list_products(
         default=False,
         description="Include inactive/archived items (Admin view)"
     ),
+    merchant_id: Optional[str] = Query(
+        default=None,
+        description="Filter products scoped to a specific merchant identifier"
+    ),
 ) -> List[Product]:
     """
     Retrieve products from the catalog.
-    Supports optional filtering by keyword query, category, and maximum price.
+    Supports optional filtering by keyword query, category, maximum price, and merchant ID.
     """
     try:
         if include_all:
-            return list_products_admin()
-        return search_products(query=query, category=category, max_price=max_price)
+            return list_products_admin(merchant_id=merchant_id)
+        return search_products(query=query, category=category, max_price=max_price, merchant_id=merchant_id)
     except Exception as e:
         import logging
         logging.getLogger("gateway.catalog").error("Error listing products from catalog: %s", e, exc_info=True)
         from app.catalog.data import PRODUCTS
         if include_all:
-            return PRODUCTS
-        if query or category or max_price:
+            return [p for p in PRODUCTS if not merchant_id or p.merchant_id == merchant_id]
+        if query or category or max_price or merchant_id:
             from app.catalog.data import PRODUCTS
             res = PRODUCTS
+            if merchant_id:
+                res = [p for p in res if p.merchant_id == merchant_id]
             if category:
                 res = [p for p in res if p.category.lower() == category.strip().lower()]
             if max_price:
@@ -65,13 +71,16 @@ def list_products(
 
 
 @router.get("/{id}", response_model=Product, summary="Get product details by ID")
-def get_product_endpoint(id: str) -> Product:
+def get_product_endpoint(
+    id: str,
+    merchant_id: Optional[str] = Query(default=None, description="Optional merchant context"),
+) -> Product:
     """
     Retrieve single product details by product ID.
     Returns 404 if the product is not found in the catalog.
     """
     try:
-        return get_product(id)
+        return get_product(id, merchant_id=merchant_id)
     except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -95,6 +104,11 @@ def create_product_endpoint(payload: CreateProductRequest) -> Product:
             status_code=status.HTTP_409_CONFLICT,
             detail=str(e),
         )
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e),
+        )
 
 
 @router.patch(
@@ -104,10 +118,14 @@ def create_product_endpoint(payload: CreateProductRequest) -> Product:
     summary="Update catalog product details (Admin CRUD)",
     dependencies=[Depends(verify_admin_key)],
 )
-def update_product_endpoint(id: str, payload: UpdateProductRequest) -> Product:
+def update_product_endpoint(
+    id: str,
+    payload: UpdateProductRequest,
+    merchant_id: Optional[str] = Query(default=None, description="Optional merchant filter"),
+) -> Product:
     """Admin endpoint to update price, stock, description, or status of a catalog product."""
     try:
-        return update_product(id, payload)
+        return update_product(id, payload, merchant_id=merchant_id)
     except ProductNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -121,9 +139,12 @@ def update_product_endpoint(id: str, payload: UpdateProductRequest) -> Product:
     summary="Archive a catalog product (Soft Delete)",
     dependencies=[Depends(verify_admin_key)],
 )
-def archive_product_endpoint(id: str) -> dict:
+def archive_product_endpoint(
+    id: str,
+    merchant_id: Optional[str] = Query(default=None, description="Optional merchant filter"),
+) -> dict:
     """Admin endpoint to soft-delete a catalog product by setting status = 'ARCHIVED'."""
-    success = archive_product(id)
+    success = archive_product(id, merchant_id=merchant_id)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

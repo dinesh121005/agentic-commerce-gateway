@@ -248,10 +248,42 @@ class CustomerAuthStore:
         with get_db_connection(self.db_path) as conn:
             yield conn
 
+    @contextlib.contextmanager
+    def _get_auth_connection(self) -> Generator[Any, None, None]:
+        """
+        Provides an authentication database connection (role: gateway_auth) for customer credential operations.
+        Fails closed if the required gateway_auth credential is not configured.
+        """
+        from app.db import is_postgres_url, get_db_connection
+        if is_postgres_url(self.db_path):
+            auth_url = os.environ.get("LOCAL_PG_AUTH_URL") or os.environ.get("PG_AUTH_URL")
+            if not auth_url:
+                raise RuntimeError(
+                    "Security failure: Missing required database connection URL for gateway_auth role: LOCAL_PG_AUTH_URL"
+                )
+            with get_db_connection(auth_url) as conn:
+                yield conn
+        else:
+            with self._get_connection() as conn:
+                yield conn
+
 
     def _ensure_db_initialized(self) -> None:
         """Ensure the table schema and seeds exist before operations."""
         if not self._initialized:
+            from app.db import is_postgres_url
+            if is_postgres_url(self.db_path):
+                try:
+                    with self._get_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'customer_credentials';"
+                        )
+                        if cursor.fetchone():
+                            self._initialized = True
+                            return
+                except Exception:
+                    pass
             self._init_db()
             self._initialized = True
 
@@ -316,13 +348,13 @@ class CustomerAuthStore:
 
     def authenticate(self, username_or_email: str, password: str) -> Optional[str]:
         """
-        Authenticates user credentials against the persisted SQLite store.
+        Authenticates user credentials against the persisted store via auth control plane.
         Returns customer_id on success, or None on failure.
         """
         self._ensure_db_initialized()
         clean = username_or_email.strip().lower()
 
-        with self._get_connection() as conn:
+        with self._get_auth_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -351,7 +383,7 @@ class CustomerAuthStore:
         password: str,
     ) -> CustomerCredentials:
         """
-        Registers new customer credentials in SQLite.
+        Registers new customer credentials via auth control plane.
         Raises ValueError if customer_id or username already exists.
         """
         self._ensure_db_initialized()
@@ -359,7 +391,7 @@ class CustomerAuthStore:
 
         pw_hash, salt = hash_password(password)
 
-        with self._get_connection() as conn:
+        with self._get_auth_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM customer_credentials WHERE customer_id = ?", (customer_id,))
             if cursor.fetchone() is not None:
@@ -387,9 +419,9 @@ class CustomerAuthStore:
         )
 
     def get_user_by_customer_id(self, customer_id: str) -> Optional[CustomerCredentials]:
-        """Fetch user credentials by customer_id."""
+        """Fetch user credentials by customer_id via auth control plane."""
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        with self._get_auth_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT customer_id, username, email, password_hash, salt FROM customer_credentials WHERE customer_id = ?",
@@ -407,9 +439,9 @@ class CustomerAuthStore:
         )
 
     def get_user_by_username(self, username: str) -> Optional[CustomerCredentials]:
-        """Fetch user credentials by username."""
+        """Fetch user credentials by username via auth control plane."""
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        with self._get_auth_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT customer_id, username, email, password_hash, salt FROM customer_credentials WHERE LOWER(username) = ?",
@@ -427,9 +459,9 @@ class CustomerAuthStore:
         )
 
     def get_user_by_email(self, email: str) -> Optional[CustomerCredentials]:
-        """Fetch user credentials by email address."""
+        """Fetch user credentials by email address via auth control plane."""
         self._ensure_db_initialized()
-        with self._get_connection() as conn:
+        with self._get_auth_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT customer_id, username, email, password_hash, salt FROM customer_credentials WHERE LOWER(email) = ?",

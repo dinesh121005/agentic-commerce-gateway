@@ -24,7 +24,7 @@ router = APIRouter(
     response_model=List[AuditRecord],
     status_code=status.HTTP_200_OK,
     summary="List audit records",
-    description="Retrieve all transaction audit records, ordered newest first. Supports filtering by customer_id, decision, and payment_status."
+    description="Retrieve all transaction audit records, ordered newest first. Supports filtering by customer_id, decision, payment_status, and merchant_id."
 )
 def list_audit_records(
     customer_id: Optional[str] = Query(
@@ -39,11 +39,20 @@ def list_audit_records(
         default=None,
         description="Filter records by payment status ('created', 'failed', 'status_unknown', 'PENDING')"
     ),
+    merchant_id: Optional[str] = Query(
+        default=None,
+        description="Filter records by merchant identifier (e.g. 'MERCH_ELEC')"
+    ),
 ) -> List[AuditRecord]:
     """
-    List audit records with optional customer_id, decision, and payment_status filters.
+    List audit records with optional customer_id, decision, payment_status, and merchant_id filters.
     """
-    return audit_store.list(customer_id=customer_id, decision=decision, payment_status=payment_status)
+    return audit_store.list(
+        customer_id=customer_id,
+        decision=decision,
+        payment_status=payment_status,
+        merchant_id=merchant_id,
+    )
 
 
 @router.get(
@@ -79,12 +88,15 @@ def get_audit_ledger_anchor() -> dict:
     summary="Get single audit record",
     description="Retrieve a specific audit record by its transaction ID (UUID)."
 )
-def get_audit_record(transaction_id: str) -> AuditRecord:
+def get_audit_record(
+    transaction_id: str,
+    merchant_id: Optional[str] = Query(default=None, description="Optional merchant filter"),
+) -> AuditRecord:
 
     """
     Fetch a single audit record by transaction_id or return 404 if not found.
     """
-    record = audit_store.get(transaction_id)
+    record = audit_store.get(transaction_id, merchant_id=merchant_id)
     if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

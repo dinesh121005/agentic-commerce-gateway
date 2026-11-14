@@ -5,10 +5,12 @@ Provides shared, reusable catalog query, CRUD, lookup, and inventory functions
 used across FastAPI HTTP routers, Merchant AI, and MCP servers.
 """
 import time
+from decimal import Decimal, ROUND_HALF_UP
 from typing import List, Optional, Tuple
 from app.catalog.data import PRODUCTS
 from app.catalog.models import CreateProductRequest, Product, UpdateProductRequest
-from app.db import get_db_connection
+from app.core.context import get_current_tenant_context
+from app.db import get_db_connection, is_postgres_url
 from app.exceptions import ProductNotFoundError
 
 _catalog_initialized = False
@@ -23,27 +25,91 @@ def _ensure_catalog_db_initialized() -> None:
     if _catalog_initialized:
         return
 
+    import os
+    db_url = os.environ.get("DATABASE_URL")
+    if is_postgres_url(db_url):
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'catalog_products';"
+                )
+                if cursor.fetchone():
+                    _catalog_initialized = True
+                    return
+        except Exception:
+            pass
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Catalog Products Table
+        # 1. Catalog Products Table with Compound Primary Key (merchant_id, id)
+        # Enables SKU/Product ID collision safety across isolated merchants.
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS catalog_products (
-                id TEXT PRIMARY KEY,
+                id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 category TEXT NOT NULL,
-                merchant_id TEXT NOT NULL,
+                merchant_id TEXT NOT NULL DEFAULT 'MERCH_ELEC',
                 price REAL NOT NULL,
                 price_paise INTEGER,
                 stock INTEGER NOT NULL,
                 description TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
                 created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (merchant_id, id)
             );
             """
         )
+
+        # Detect if existing table has single PK on 'id' and migrate to compound PK (merchant_id, id) (SQLite only)
+        import os
+        db_url = os.environ.get("DATABASE_URL", "gateway.db")
+        if not is_postgres_url(db_url):
+            try:
+                cursor.execute("PRAGMA table_info(catalog_products);")
+                col_info = cursor.fetchall()
+                pk_cols = [c[1] for c in col_info if c[5] > 0]
+                if col_info and "merchant_id" not in pk_cols:
+                    try:
+                        cursor.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS catalog_products_v2 (
+                                id TEXT NOT NULL,
+                                name TEXT NOT NULL,
+                                category TEXT NOT NULL,
+                                merchant_id TEXT NOT NULL DEFAULT 'MERCH_ELEC',
+                                price REAL NOT NULL,
+                                price_paise INTEGER,
+                                stock INTEGER NOT NULL,
+                                description TEXT NOT NULL,
+                                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                                created_at REAL NOT NULL,
+                                updated_at REAL NOT NULL,
+                                PRIMARY KEY (merchant_id, id)
+                            );
+                            """
+                        )
+                        cursor.execute(
+                            """
+                            INSERT OR IGNORE INTO catalog_products_v2 (
+                                id, name, category, merchant_id, price, price_paise, stock, description, status, created_at, updated_at
+                            )
+                            SELECT id, name, category, COALESCE(NULLIF(merchant_id, ''), 'MERCH_ELEC'), price, price_paise, stock, description, status, created_at, updated_at
+                            FROM catalog_products;
+                            """
+                        )
+                        cursor.execute("DROP TABLE catalog_products;")
+                        cursor.execute("ALTER TABLE catalog_products_v2 RENAME TO catalog_products;")
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+            except Exception:
+                pass
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cat_merchant ON catalog_products (merchant_id);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cat_status ON catalog_products (status);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cat_category ON catalog_products (category);")
 
@@ -93,14 +159,14 @@ def _ensure_catalog_db_initialized() -> None:
                 cursor.execute("ALTER TABLE catalog_products ADD COLUMN merchant_id TEXT NOT NULL DEFAULT 'MERCH_ELEC';")
                 conn.commit()
             except Exception:
-                pass
+                conn.rollback()
 
         if "status" not in existing_cols:
             try:
                 cursor.execute("ALTER TABLE catalog_products ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE';")
                 conn.commit()
             except Exception:
-                pass
+                conn.rollback()
 
         now_ts = time.time()
         if "created_at" not in existing_cols:
@@ -108,24 +174,23 @@ def _ensure_catalog_db_initialized() -> None:
                 cursor.execute(f"ALTER TABLE catalog_products ADD COLUMN created_at REAL NOT NULL DEFAULT {now_ts};")
                 conn.commit()
             except Exception:
-                pass
+                conn.rollback()
 
         if "updated_at" not in existing_cols:
             try:
                 cursor.execute(f"ALTER TABLE catalog_products ADD COLUMN updated_at REAL NOT NULL DEFAULT {now_ts};")
                 conn.commit()
             except Exception:
-                pass
+                conn.rollback()
 
         if "price_paise" not in existing_cols:
             try:
                 cursor.execute("ALTER TABLE catalog_products ADD COLUMN price_paise INTEGER;")
                 conn.commit()
             except Exception:
-                pass
+                conn.rollback()
 
         # Always ensure all catalog products from seed data exist (ON CONFLICT DO NOTHING preserves edited products)
-        from decimal import Decimal, ROUND_HALF_UP
         for p in PRODUCTS:
             p_status = "ACTIVE" if p.stock > 0 else "OUT_OF_STOCK"
             p_paise = int((Decimal(str(p.price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -134,11 +199,18 @@ def _ensure_catalog_db_initialized() -> None:
                 INSERT INTO catalog_products (
                     id, name, category, merchant_id, price, price_paise, stock, description, status, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO NOTHING;
+                ON CONFLICT(merchant_id, id) DO NOTHING;
                 """,
                 (p.id, p.name, p.category, p.merchant_id, p.price, p_paise, p.stock, p.description, p_status, now_ts, now_ts),
             )
         conn.commit()
+
+        # Backfill any remaining null/empty merchant_id to authoritative MERCH_ELEC
+        try:
+            cursor.execute("UPDATE catalog_products SET merchant_id = 'MERCH_ELEC' WHERE merchant_id IS NULL OR merchant_id = '';")
+            conn.commit()
+        except Exception:
+            pass
 
         # Backfill any remaining null price_paise (e.g. from existing unpopulated rows)
         try:
@@ -221,12 +293,24 @@ def search_products(
     category: Optional[str] = None,
     max_price: Optional[float] = None,
     include_all_statuses: bool = False,
+    merchant_id: Optional[str] = None,
 ) -> List[Product]:
     """
     Search and filter products from the persistent database catalog.
     Supports multi-word search, category filtering, max price limit, and status check.
+    Enforces merchant scoping if merchant_id is specified or active in TenantContext.
     """
     _ensure_catalog_db_initialized()
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        if merchant_id is not None and merchant_id != tenant_ctx.merchant_id:
+            return []
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         sql = (
@@ -238,6 +322,10 @@ def search_products(
 
         if not include_all_statuses:
             conditions.append("status != 'ARCHIVED'")
+
+        if effective_merchant_id:
+            conditions.append("merchant_id = ?")
+            params.append(effective_merchant_id)
 
         if category is not None and category.strip():
             conditions.append("LOWER(category) = ?")
@@ -308,23 +396,48 @@ def search_products(
     return all_products
 
 
-def get_product(product_id: str) -> Product:
+def get_product(product_id: str, merchant_id: Optional[str] = None) -> Product:
     """
     Retrieve a single product by its ID from the database catalog.
+    Enforces merchant isolation if merchant_id is provided or active in TenantContext.
     Raises ProductNotFoundError if not found or ARCHIVED.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        if merchant_id is not None and merchant_id != tenant_ctx.merchant_id:
+            raise ProductNotFoundError(f"{clean_id} (access denied for merchant {tenant_ctx.merchant_id})")
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
-            FROM catalog_products
-            WHERE id = ? AND status != 'ARCHIVED';
-            """,
-            (clean_id,),
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
+                FROM catalog_products
+                WHERE id = ? AND merchant_id = ? AND status != 'ARCHIVED';
+                """,
+                (clean_id, effective_merchant_id),
+            )
+        else:
+            # Fallback for legacy single-tenant calls without tenant context:
+            # If multiple merchants have this id, prefer 'MERCH_ELEC' (the default) or first active
+            cursor.execute(
+                """
+                SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
+                FROM catalog_products
+                WHERE id = ? AND status != 'ARCHIVED'
+                ORDER BY CASE WHEN merchant_id = 'MERCH_ELEC' THEN 0 ELSE 1 END, created_at ASC
+                LIMIT 1;
+                """,
+                (clean_id,),
+            )
         row = cursor.fetchone()
 
     if row is None:
@@ -332,53 +445,95 @@ def get_product(product_id: str) -> Product:
     return row_to_product(row)
 
 
-def decrement_stock(product_id: str, quantity: int = 1) -> bool:
+def decrement_stock(product_id: str, quantity: int = 1, merchant_id: Optional[str] = None) -> bool:
     """
     Safely decrements persistent inventory stock for a product upon purchase confirmation
     using an atomic conditional SQL update to eliminate TOCTOU race conditions (ADR-02 §4.1).
     Automatically updates status to OUT_OF_STOCK if stock reaches 0.
+    Enforces merchant isolation if merchant_id is provided or active in TenantContext.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     now = time.time()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE catalog_products
-            SET stock = stock - ?,
-                status = CASE WHEN stock - ? = 0 THEN 'OUT_OF_STOCK' ELSE status END,
-                updated_at = ?
-            WHERE id = ? AND stock >= ?;
-            """,
-            (quantity, quantity, now, clean_id, quantity),
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET stock = stock - ?,
+                    status = CASE WHEN stock - ? = 0 THEN 'OUT_OF_STOCK' ELSE status END,
+                    updated_at = ?
+                WHERE id = ? AND merchant_id = ? AND stock >= ?;
+                """,
+                (quantity, quantity, now, clean_id, effective_merchant_id, quantity),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET stock = stock - ?,
+                    status = CASE WHEN stock - ? = 0 THEN 'OUT_OF_STOCK' ELSE status END,
+                    updated_at = ?
+                WHERE id = ? AND stock >= ?;
+                """,
+                (quantity, quantity, now, clean_id, quantity),
+            )
         if cursor.rowcount == 0:
             return False
         conn.commit()
         return True
 
 
-def restore_stock(product_id: str, quantity: int = 1) -> None:
+def restore_stock(product_id: str, quantity: int = 1, merchant_id: Optional[str] = None) -> None:
     """
     Restores persistent inventory stock for a product if an order is cancelled or rolled back.
     Automatically restores status to ACTIVE if stock is restored.
+    Enforces merchant isolation if merchant_id is provided or active in TenantContext.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     now = time.time()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE catalog_products
-            SET stock = stock + ?,
-                status = CASE WHEN status = 'OUT_OF_STOCK' THEN 'ACTIVE' ELSE status END,
-                updated_at = ?
-            WHERE id = ?;
-            """,
-            (quantity, now, clean_id),
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET stock = stock + ?,
+                    status = CASE WHEN status = 'OUT_OF_STOCK' THEN 'ACTIVE' ELSE status END,
+                    updated_at = ?
+                WHERE id = ? AND merchant_id = ?;
+                """,
+                (quantity, now, clean_id, effective_merchant_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET stock = stock + ?,
+                    status = CASE WHEN status = 'OUT_OF_STOCK' THEN 'ACTIVE' ELSE status END,
+                    updated_at = ?
+                WHERE id = ?;
+                """,
+                (quantity, now, clean_id),
+            )
         conn.commit()
 
 
@@ -386,34 +541,68 @@ def restore_stock(product_id: str, quantity: int = 1) -> None:
 # Store Catalog Persistent Admin CRUD Functions (Section 11 Requirement)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def list_products_admin() -> List[Product]:
-    """Retrieves all catalog products including inactive/out-of-stock items for Admin management."""
+def list_products_admin(merchant_id: Optional[str] = None) -> List[Product]:
+    """Retrieves catalog products including inactive/out-of-stock items for Admin management."""
     _ensure_catalog_db_initialized()
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
-            FROM catalog_products
-            ORDER BY created_at DESC, id ASC;
-            """
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
+                FROM catalog_products
+                WHERE merchant_id = ?
+                ORDER BY created_at DESC, id ASC;
+                """,
+                (effective_merchant_id,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, name, category, merchant_id, price, stock, description, status, price_paise
+                FROM catalog_products
+                ORDER BY created_at DESC, id ASC;
+                """
+            )
         rows = cursor.fetchall()
     return [row_to_product(r) for r in rows]
 
 
-def create_product(req: CreateProductRequest) -> Product:
-    """Creates a new catalog product in persistent database storage."""
+def create_product(req: CreateProductRequest, merchant_id: Optional[str] = None) -> Product:
+    """Creates a new catalog product in persistent database storage scoped to merchant."""
     _ensure_catalog_db_initialized()
     clean_id = req.id.strip().upper()
     now = time.time()
     p_status = req.status.upper() if req.status else ("ACTIVE" if req.stock > 0 else "OUT_OF_STOCK")
 
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        if merchant_id is not None and merchant_id != tenant_ctx.merchant_id:
+            raise PermissionError(f"Cannot create product for another merchant '{merchant_id}'.")
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+    else:
+        effective_merchant_id = req.merchant_id.strip() if req.merchant_id else "MERCH_ELEC"
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM catalog_products WHERE id = ?;", (clean_id,))
+        cursor.execute(
+            "SELECT 1 FROM catalog_products WHERE id = ? AND merchant_id = ?;",
+            (clean_id, effective_merchant_id),
+        )
         if cursor.fetchone() is not None:
-            raise ValueError(f"Product ID '{clean_id}' already exists in catalog.")
+            raise ValueError(f"Product ID '{clean_id}' already exists in catalog for merchant '{effective_merchant_id}'.")
 
         p_paise = int((Decimal(str(req.price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         cursor.execute(
@@ -426,7 +615,7 @@ def create_product(req: CreateProductRequest) -> Product:
                 clean_id,
                 req.name.strip(),
                 req.category.strip().lower(),
-                req.merchant_id.strip(),
+                effective_merchant_id,
                 float(req.price),
                 p_paise,
                 int(req.stock),
@@ -438,14 +627,23 @@ def create_product(req: CreateProductRequest) -> Product:
         )
         conn.commit()
 
-    return get_product(clean_id)
+    return get_product(clean_id, merchant_id=effective_merchant_id)
 
 
-def update_product(product_id: str, req: UpdateProductRequest) -> Product:
+def update_product(product_id: str, req: UpdateProductRequest, merchant_id: Optional[str] = None) -> Product:
     """Updates fields of an existing catalog product in persistent database storage."""
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
-    existing = get_product(clean_id)
+
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
+    existing = get_product(clean_id, merchant_id=effective_merchant_id)
 
     name = req.name.strip() if req.name is not None else existing.name
     category = req.category.strip().lower() if req.category is not None else existing.category
@@ -461,37 +659,66 @@ def update_product(product_id: str, req: UpdateProductRequest) -> Product:
     p_paise = int((Decimal(str(price)) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE catalog_products
-            SET name = ?, category = ?, price = ?, price_paise = ?, stock = ?, description = ?, status = ?, updated_at = ?
-            WHERE id = ?;
-            """,
-            (name, category, price, p_paise, stock, description, status, now, clean_id),
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET name = ?, category = ?, price = ?, price_paise = ?, stock = ?, description = ?, status = ?, updated_at = ?
+                WHERE id = ? AND merchant_id = ?;
+                """,
+                (name, category, price, p_paise, stock, description, status, now, clean_id, effective_merchant_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET name = ?, category = ?, price = ?, price_paise = ?, stock = ?, description = ?, status = ?, updated_at = ?
+                WHERE id = ?;
+                """,
+                (name, category, price, p_paise, stock, description, status, now, clean_id),
+            )
         conn.commit()
 
-    return get_product(clean_id)
+    return get_product(clean_id, merchant_id=effective_merchant_id)
 
 
-def archive_product(product_id: str) -> bool:
+def archive_product(product_id: str, merchant_id: Optional[str] = None) -> bool:
     """
     Soft-deletes a product by setting status = 'ARCHIVED'.
     Preserves historical integrity for audit_records referencing this product ID.
     """
     _ensure_catalog_db_initialized()
     clean_id = product_id.strip()
+
+    tenant_ctx = get_current_tenant_context()
+
+    effective_merchant_id = None
+    if tenant_ctx is not None:
+        effective_merchant_id = tenant_ctx.merchant_id
+    elif merchant_id is not None:
+        effective_merchant_id = merchant_id
+
     now = time.time()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE catalog_products
-            SET status = 'ARCHIVED', updated_at = ?
-            WHERE id = ?;
-            """,
-            (now, clean_id),
-        )
+        if effective_merchant_id:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET status = 'ARCHIVED', updated_at = ?
+                WHERE id = ? AND merchant_id = ?;
+                """,
+                (now, clean_id, effective_merchant_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE catalog_products
+                SET status = 'ARCHIVED', updated_at = ?
+                WHERE id = ?;
+                """,
+                (now, clean_id),
+            )
         conn.commit()
         return cursor.rowcount > 0
 
